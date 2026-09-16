@@ -6,3 +6,4 @@ dist/
 .DS_Store
 .opencode/node_modules/
 opencode-voice-supervisor/node_modules/
+agent-tools/

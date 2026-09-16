@@ -29,7 +29,7 @@ SSH into a remote OpenCode server uses **that** machine's mic. Run the TUI local
 
 ## Install
 
-From this repo (already wired in `opencode.json`):
+From this repo (already wired in `opencode.json` **and** `tui.json`):
 
 ```bash
 cd opencode-voice-supervisor
@@ -38,13 +38,16 @@ cd ..
 opencode
 ```
 
+OpenCode 1.18 loads TUI plugins only from `tui.json` / `.opencode/tui.json`. `opencode.json` loads the server `voice_status` tool, not the chip. After `git pull`, fully quit OpenCode and restart it from the repo root. You should get a “Voice” toast, `○ voice` on the right of the prompt, and `/voice` in the slash list next to `/review`.
+
 Voice uses the **OpenAI key already saved in OpenCode** (`opencode auth login` / `/connect`, stored in `~/.local/share/opencode/auth.json`). You do not need to `export OPENAI_API_KEY` again if OpenCode can already talk to OpenAI.
 
 If OpenCode only has a ChatGPT/Codex OAuth login, Realtime still needs a platform API key: `opencode auth login` → OpenAI → API key.
 
-Or add the plugin to any project:
+Or add the plugin to any project. Server (tools) goes in `opencode.json`. Chip + `/voice` go in `tui.json` (or `.opencode/tui.json`):
 
 ```jsonc
+// opencode.json
 {
   "$schema": "https://opencode.ai/config.json",
   "plugin": [
@@ -53,7 +56,17 @@ Or add the plugin to any project:
 }
 ```
 
-Absolute paths work too. OpenCode loads both the server entry (`.`) and the TUI entry (`./tui`).
+```jsonc
+// tui.json  (required for the chip — OpenCode does not auto-load TUI from opencode.json)
+{
+  "$schema": "https://opencode.ai/tui.json",
+  "plugin": [
+    ["./opencode-voice-supervisor/src/tui.tsx", { "voice": "marin", "model": "gpt-realtime" }]
+  ]
+}
+```
+
+Absolute paths work too. The package exports `./server` and `./tui`; a TUI file plugin must not export `server`.
 
 ## Use
 

@@ -37,7 +37,7 @@ const Chip = (props: { supervisor: VoiceSupervisor; onToggle: () => void }) => {
   )
 }
 
-const tui: TuiPlugin = async (api, options) => {
+const tui: TuiPlugin = async (api, options, meta) => {
   if (options?.enabled === false) return
   const resolved = resolveOptions(options)
   const supervisor = createVoiceSupervisor({
@@ -84,77 +84,89 @@ const tui: TuiPlugin = async (api, options) => {
     },
   ])
 
-  api.command?.register(() => [
-    {
-      title: "Voice: toggle",
-      value: "plugin.voice.toggle",
-      category: "Voice",
-      keybind: resolved.keybind,
-      slash: { name: "voice" },
-      onSelect: () => {
-        toggle()
+  // Slash commands, palette rows, and Ctrl+Shift+V come from the keymap.
+  // OpenCode's TUI does not load plugins from opencode.json — they must be
+  // listed in tui.json and registered here with namespace "palette".
+  api.keymap.registerLayer({
+    mode: "base",
+    commands: [
+      {
+        name: "voice.toggle",
+        title: "Voice: toggle",
+        category: "Voice",
+        namespace: "palette",
+        slashName: "voice",
+        suggested: true,
+        run: toggle,
       },
-    },
-    {
-      title: "Voice: on",
-      value: "plugin.voice.on",
-      category: "Voice",
-      slash: { name: "voice-on" },
-      onSelect: () => {
-        void supervisor.start()
+      {
+        name: "voice.on",
+        title: "Voice: on",
+        category: "Voice",
+        namespace: "palette",
+        slashName: "voice-on",
+        run: () => {
+          void supervisor.start()
+        },
       },
-    },
-    {
-      title: "Voice: off",
-      value: "plugin.voice.off",
-      category: "Voice",
-      slash: { name: "voice-off" },
-      onSelect: () => {
-        void supervisor.stop()
+      {
+        name: "voice.off",
+        title: "Voice: off",
+        category: "Voice",
+        namespace: "palette",
+        slashName: "voice-off",
+        run: () => {
+          void supervisor.stop()
+        },
       },
-    },
-    {
-      title: "Voice: mute",
-      value: "plugin.voice.mute",
-      category: "Voice",
-      slash: { name: "voice-mute" },
-      onSelect: () => {
-        void supervisor.mute()
+      {
+        name: "voice.mute",
+        title: "Voice: mute",
+        category: "Voice",
+        namespace: "palette",
+        slashName: "voice-mute",
+        run: () => {
+          void supervisor.mute()
+        },
       },
-    },
-    {
-      title: "Voice: unmute",
-      value: "plugin.voice.unmute",
-      category: "Voice",
-      slash: { name: "voice-unmute" },
-      onSelect: () => {
-        void supervisor.unmute()
+      {
+        name: "voice.unmute",
+        title: "Voice: unmute",
+        category: "Voice",
+        namespace: "palette",
+        slashName: "voice-unmute",
+        run: () => {
+          void supervisor.unmute()
+        },
       },
-    },
-    {
-      title: "Voice: status",
-      value: "plugin.voice.status",
-      category: "Voice",
-      slash: { name: "voice-status" },
-      onSelect: () => {
-        api.ui.toast({
-          title: "Voice",
-          message: supervisor.statusText(),
-          variant: "info",
-          duration: 5000,
-        })
+      {
+        name: "voice.status",
+        title: "Voice: status",
+        category: "Voice",
+        namespace: "palette",
+        slashName: "voice-status",
+        run: () => {
+          api.ui.toast({
+            title: "Voice",
+            message: supervisor.statusText(),
+            variant: "info",
+            duration: 5000,
+          })
+        },
       },
-    },
-    {
-      title: "Voice: panel",
-      value: "plugin.voice.panel",
-      category: "Voice",
-      slash: { name: "voice-panel" },
-      onSelect: () => {
-        api.route.navigate("voice.supervisor")
+      {
+        name: "voice.panel",
+        title: "Voice: panel",
+        category: "Voice",
+        namespace: "palette",
+        slashName: "voice-panel",
+        run: () => {
+          api.route.navigate("voice.supervisor")
+        },
       },
-    },
-  ])
+    ],
+    bindings: [{ key: resolved.keybind, cmd: "voice.toggle", desc: "Toggle voice" }],
+  })
 
   api.slots.register({
     slots: {
@@ -164,10 +176,14 @@ const tui: TuiPlugin = async (api, options) => {
       session_prompt_right() {
         return <Chip supervisor={supervisor} onToggle={toggle} />
       },
-      home_footer() {
-        return <Chip supervisor={supervisor} onToggle={toggle} />
-      },
     },
+  })
+
+  api.ui.toast({
+    title: "Voice",
+    message: "○ voice is in the prompt row. Type /voice or Ctrl+Shift+V.",
+    variant: meta.state === "first" ? "success" : "info",
+    duration: 6000,
   })
 }
 

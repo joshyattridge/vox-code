@@ -18,7 +18,7 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node --experimental-strip-types --test test/auth.test.ts test/persist.test.ts test/realtime.test.ts test/status.test.ts test/supervisor.test.ts test/tools.test.ts",
+    "test": "node --experimental-strip-types --test test/auth.test.ts test/persist.test.ts test/realtime.test.ts test/status.test.ts test/supervisor.test.ts test/tools.test.ts test/tui-config.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
