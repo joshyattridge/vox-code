@@ -1,0 +1,21 @@
+import assert from "node:assert/strict"
+import { test } from "node:test"
+import { readFileSync } from "node:fs"
+import { persistVoiceState, readPersistedVoiceState, stateFilePath } from "../src/persist.ts"
+
+test("persisted state includes the chip label", () => {
+  persistVoiceState({
+    phase: "listening",
+    realtimeConnected: true,
+    muted: false,
+    ownedSessionIds: ["ses_1"],
+    lastUserTranscript: "write tests",
+  })
+  const saved = readPersistedVoiceState()
+  assert.equal(saved.chip, "● listening")
+  assert.equal(saved.ownedSessionIds[0], "ses_1")
+  assert.equal(typeof saved.updatedAt, "number")
+  const file = stateFilePath()
+  assert.equal(JSON.parse(readFileSync(file, "utf8")).phase, "listening")
+  assert.ok(file.includes("voice-supervisor"))
+})

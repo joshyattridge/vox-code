@@ -1,0 +1,49 @@
+{
+  "name": "opencode-voice-supervisor",
+  "version": "0.1.0",
+  "description": "In-process OpenAI Realtime voice supervisor for OpenCode. Talk to a live voice agent; it drives multiple OpenCode coding sessions.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "opencode": ">=1.18.29"
+  },
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./server": "./src/index.ts",
+    "./tui": "./src/tui.tsx"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/persist.test.ts test/realtime.test.ts test/status.test.ts test/supervisor.test.ts test/tools.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "1.18.31",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.8.2"
+  },
+  "peerDependencies": {
+    "@opentui/core": ">=0.4.5",
+    "@opentui/solid": ">=0.4.5",
+    "solid-js": ">=1.9.0"
+  },
+  "peerDependenciesMeta": {
+    "@opentui/core": {
+      "optional": true
+    },
+    "@opentui/solid": {
+      "optional": true
+    },
+    "solid-js": {
+      "optional": true
+    }
+  }
+}
