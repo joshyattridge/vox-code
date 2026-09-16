@@ -35,9 +35,12 @@ From this repo (already wired in `opencode.json`):
 cd opencode-voice-supervisor
 npm install
 cd ..
-export OPENAI_API_KEY=sk-...
 opencode
 ```
+
+Voice uses the **OpenAI key already saved in OpenCode** (`opencode auth login` / `/connect`, stored in `~/.local/share/opencode/auth.json`). You do not need to `export OPENAI_API_KEY` again if OpenCode can already talk to OpenAI.
+
+If OpenCode only has a ChatGPT/Codex OAuth login, Realtime still needs a platform API key: `opencode auth login` → OpenAI → API key.
 
 Or add the plugin to any project:
 
@@ -81,7 +84,7 @@ Plugin options in `opencode.json`, or env vars:
 | `model` | `OPENAI_REALTIME_MODEL` | `gpt-realtime` |
 | `voice` | `OPENAI_REALTIME_VOICE` | `marin` |
 | `keybind` | | `ctrl+shift+v` |
-| `apiKey` | `OPENAI_API_KEY` | required |
+| `apiKey` | | optional override; otherwise OpenCode auth / `OPENAI_API_KEY` |
 
 Realtime audio is billed by OpenAI. The mic is live whenever the chip is not `○ voice` or `● muted`.
 

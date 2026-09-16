@@ -1,3 +1,4 @@
+import { resolveOpenAiApiKey, type ResolvedApiKey } from "./auth.ts"
 import { detectAudio, type AudioIO } from "./audio.ts"
 import { persistVoiceState } from "./persist.ts"
 import { createSessionController, type SessionController } from "./sessions.ts"
@@ -35,6 +36,7 @@ export function createVoiceSupervisor(input: {
   directory?: string
   hooks?: SupervisorHooks
   connect?: typeof openRealtime
+  resolveKey?: () => ResolvedApiKey | Promise<ResolvedApiKey>
 }): VoiceSupervisor {
   const options = resolveOptions(input.options as Record<string, unknown> | undefined)
   const sessions: SessionController = createSessionController(input.client, input.directory)
@@ -43,6 +45,7 @@ export function createVoiceSupervisor(input: {
   let realtime: RealtimeSession | undefined
   let audio: AudioIO | undefined = input.audio
   let starting = false
+  let keySource = "missing"
 
   const notify = () => {
     persistVoiceState(state)
@@ -65,18 +68,25 @@ export function createVoiceSupervisor(input: {
 
   const start = async () => {
     if (starting || state.realtimeConnected) return
-    if (!options.apiKey) {
-      setState({ phase: "error", error: "Set OPENAI_API_KEY to enable voice." })
-      toast("Set OPENAI_API_KEY to enable voice.", "error")
+    const resolvedKey = await (input.resolveKey ??
+      (() =>
+        resolveOpenAiApiKey({
+          pluginKey: options.apiKey,
+          directory: input.directory,
+        })))()
+    if (!resolvedKey.key) {
+      setState({ phase: "error", error: resolvedKey.hint })
+      toast(resolvedKey.hint, "error")
       return
     }
+    keySource = resolvedKey.source
     starting = true
     setState({ phase: "connecting", error: undefined })
     try {
       audio = audio ?? detectAudio()
       const connect = input.connect ?? openRealtime
       realtime = await connect({
-        apiKey: options.apiKey,
+        apiKey: resolvedKey.key,
         model: options.model,
         voice: options.voice,
         instructions: options.instructions,
@@ -175,6 +185,7 @@ export function createVoiceSupervisor(input: {
         `realtime: ${state.realtimeConnected ? "connected" : "down"}`,
         `model: ${options.model}`,
         `voice: ${options.voice}`,
+        `api key: ${keySource}`,
         `owned sessions: ${owned.length ? owned.join(", ") : "(none)"}`,
       ]
       if (state.lastUserTranscript) lines.push(`heard: ${state.lastUserTranscript}`)

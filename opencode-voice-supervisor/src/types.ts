@@ -51,8 +51,7 @@ export function resolveOptions(raw: Record<string, unknown> | undefined): Requir
     DEFAULT_VOICE
   const keybind =
     (typeof raw?.keybind === "string" && raw.keybind) || DEFAULT_KEYBIND
-  const apiKey =
-    (typeof raw?.apiKey === "string" && raw.apiKey) || process.env.OPENAI_API_KEY
+  const apiKey = typeof raw?.apiKey === "string" && raw.apiKey.trim() ? raw.apiKey.trim() : undefined
   const instructions = typeof raw?.instructions === "string" ? raw.instructions : undefined
   return { model, voice, keybind, apiKey, instructions }
 }

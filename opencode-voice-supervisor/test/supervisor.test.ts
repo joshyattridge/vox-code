@@ -32,18 +32,18 @@ const client: SessionClient = {
 }
 
 test("start without an API key surfaces a TUI error state", async () => {
-  delete process.env.OPENAI_API_KEY
   const toasts: string[] = []
   const supervisor = createVoiceSupervisor({
     client,
     options: {},
     audio: new MemoryAudio(),
+    resolveKey: () => ({ source: "missing", hint: "No OpenAI API key in OpenCode." }),
     hooks: { toast: ({ message }) => toasts.push(message) },
   })
   await supervisor.start()
   assert.equal(supervisor.state().phase, "error")
   assert.match(supervisor.chip(), /error/)
-  assert.match(toasts.join(" "), /OPENAI_API_KEY/)
+  assert.match(toasts.join(" "), /OpenAI API key/)
 })
 
 test("toggle starts when a key and fake realtime session exist", async () => {

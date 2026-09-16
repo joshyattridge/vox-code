@@ -1,4 +1,5 @@
 import { tool, type PluginModule } from "@opencode-ai/plugin"
+import { resolveOpenAiApiKey } from "./auth.ts"
 import { readPersistedVoiceState } from "./persist.ts"
 import { resolveOptions } from "./types.ts"
 
@@ -28,7 +29,13 @@ const server: PluginModule["server"] = async (input, options) => {
             state.lastUserTranscript ? `heard: ${state.lastUserTranscript}` : undefined,
             state.lastAssistantTranscript ? `said: ${state.lastAssistantTranscript}` : undefined,
             state.error ? `error: ${state.error}` : undefined,
-            resolved.apiKey ? "api key: set" : "api key: missing (set OPENAI_API_KEY)",
+            (() => {
+              const key = resolveOpenAiApiKey({
+                pluginKey: resolved.apiKey,
+                directory: input.directory,
+              })
+              return key.key ? `api key: ${key.source}` : `api key: missing — ${key.hint}`
+            })(),
             "Turn voice on from the TUI with /voice or Ctrl+Shift+V.",
           ]
             .filter(Boolean)

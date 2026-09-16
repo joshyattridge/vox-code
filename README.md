@@ -8,7 +8,7 @@ Chip in the prompt row: `○ voice` / `● VOICE` / `● listening`.
 
 ```bash
 cd opencode-voice-supervisor && npm install && cd ..
-export OPENAI_API_KEY=sk-...
+# uses the OpenAI key already in OpenCode (/connect or auth.json)
 # mic tools: sox or arecord/aplay
 opencode
 ```
