@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { Buffer } from "node:buffer"
-import { createRealtimeSession, sessionUpdatePayload } from "../src/realtime.ts"
+import { createRealtimeSession, realtimeConnectConfig, sessionUpdatePayload } from "../src/realtime.ts"
 
 class FakeSocket {
   readyState = 1
@@ -19,12 +19,26 @@ class FakeSocket {
   }
 }
 
-test("session update registers supervisor tools", () => {
-  const payload = sessionUpdatePayload({ voice: "cedar" })
-  const names = (payload.session.tools as Array<{ name: string }>).map((tool) => tool.name)
+test("session update uses the GA realtime shape", () => {
+  const payload = sessionUpdatePayload({ voice: "cedar", model: "gpt-realtime" })
+  assert.equal(payload.session.type, "realtime")
+  assert.equal(payload.session.model, "gpt-realtime")
+  assert.deepEqual(payload.session.output_modalities, ["audio"])
+  assert.equal(payload.session.audio.output.voice, "cedar")
+  assert.equal(payload.session.audio.input.format.type, "audio/pcm")
+  assert.equal(payload.session.audio.input.turn_detection.type, "semantic_vad")
+  const names = payload.session.tools.map((tool) => tool.name)
   assert.ok(names.includes("create_session"))
   assert.ok(names.includes("prompt_session"))
-  assert.equal(payload.session.voice, "cedar")
+  assert.equal("voice" in payload.session, false)
+  assert.equal("modalities" in payload.session, false)
+})
+
+test("GA websocket connect does not send the retired beta header", () => {
+  const config = realtimeConnectConfig({ apiKey: "sk-test", model: "gpt-realtime" })
+  assert.equal(config.url, "wss://api.openai.com/v1/realtime?model=gpt-realtime")
+  assert.equal(config.headers.Authorization, "Bearer sk-test")
+  assert.equal("OpenAI-Beta" in config.headers, false)
 })
 
 test("function call events dispatch tools and return output", async () => {
@@ -50,14 +64,62 @@ test("function call events dispatch tools and return output", async () => {
   assert.match(output.item.output, /accepted/)
 })
 
-test("speech started clears playback audio", () => {
+test("GA function calls also arrive on response.output_item.done", async () => {
+  const socket = new FakeSocket()
+  const calls: string[] = []
+  createRealtimeSession(socket, {
+    onTool: async (name) => {
+      calls.push(name)
+      return { ok: true }
+    },
+  })
+  socket.emit({
+    type: "response.output_item.done",
+    item: {
+      type: "function_call",
+      call_id: "call_dup",
+      name: "list_sessions",
+      arguments: "{}",
+    },
+  })
+  socket.emit({
+    type: "response.function_call_arguments.done",
+    name: "list_sessions",
+    call_id: "call_dup",
+    arguments: "{}",
+  })
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  assert.deepEqual(calls, ["list_sessions"])
+})
+
+test("speech started does not send unsupported GA client events", () => {
   const socket = new FakeSocket()
   let started = false
   createRealtimeSession(socket, { onSpeechStarted: () => { started = true } })
   socket.emit({ type: "input_audio_buffer.speech_started" })
   assert.equal(started, true)
-  const types = socket.sent.map((row) => (row as { type: string }).type)
-  assert.ok(types.includes("output_audio_buffer.clear"))
+  assert.deepEqual(socket.sent, [])
+})
+
+test("ignores benign cancellation errors", () => {
+  const socket = new FakeSocket()
+  const errors: string[] = []
+  createRealtimeSession(socket, { onError: (message) => errors.push(message) })
+  socket.emit({
+    type: "error",
+    error: { message: "Cancellation failed: no active response found" },
+  })
+  assert.deepEqual(errors, [])
+  socket.emit({
+    type: "error",
+    error: { message: "Invalid value: 'output_audio_buffer.clear'." },
+  })
+  assert.deepEqual(errors, [])
+  socket.emit({
+    type: "error",
+    error: { message: "The Realtime Beta API is no longer supported" },
+  })
+  assert.equal(errors[0], "The Realtime Beta API is no longer supported")
 })
 
 test("audio deltas decode from base64", () => {

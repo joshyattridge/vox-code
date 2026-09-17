@@ -1,8 +1,17 @@
+import { voiceLog } from "./log.ts"
 import type { SessionController } from "./sessions.ts"
 
 export type ToolContext = {
   currentSessionId?: string
   warnSharedCheckout?: boolean
+  directory?: string
+}
+
+export type ToolContextInput = ToolContext | (() => ToolContext)
+
+export function resolveToolContext(ctx?: ToolContextInput): ToolContext {
+  if (!ctx) return {}
+  return typeof ctx === "function" ? ctx() : ctx
 }
 
 export type ToolResult = {
@@ -21,7 +30,7 @@ export const REALTIME_TOOLS = [
     type: "function",
     name: "create_session",
     description:
-      "Create a new worker OpenCode session. Use a separate directory/worktree when two sessions will edit files at once.",
+      "Create a worker OpenCode session, optionally prompt it, and focus it in the TUI so the user can watch. Omit directory to use the current project. For a new folder in the user's home, pass a path like /Users/<name>/pong — never /home, /root, /workspace, or /tmp unless they asked for that path. Missing folders are created. Voice keeps running if the TUI switches projects.",
     parameters: {
       type: "object",
       properties: {
@@ -29,6 +38,10 @@ export const REALTIME_TOOLS = [
         directory: {
           type: "string",
           description: "Absolute project directory or git worktree for this worker",
+        },
+        prompt: {
+          type: "string",
+          description: "Optional coding prompt to send immediately after create. Prefer this over a second prompt_session call.",
         },
       },
       additionalProperties: false,
@@ -63,7 +76,8 @@ export const REALTIME_TOOLS = [
   {
     type: "function",
     name: "session_status",
-    description: "Get status and a short diff summary for a session.",
+    description:
+      "Get worker status plus its last assistant message. idle/unknown with lastMessage means the work finished — speak that result. Do not prompt the worker again for a status report.",
     parameters: {
       type: "object",
       properties: { session_id: { type: "string" } },
@@ -89,7 +103,8 @@ export const REALTIME_TOOLS = [
   {
     type: "function",
     name: "focus_session",
-    description: "Focus a session tab in the OpenCode TUI if the user is looking at the TUI.",
+    description:
+      "Focus a session in the OpenCode TUI, including a worker in another folder. The voice daemon keeps running if the TUI switches projects.",
     parameters: {
       type: "object",
       properties: { session_id: { type: "string" } },
@@ -99,9 +114,27 @@ export const REALTIME_TOOLS = [
   },
 ] as const
 
-export type FocusHandler = (sessionId: string) => boolean | Promise<boolean>
+export type FocusHandler = (sessionId: string, directory?: string) => boolean | Promise<boolean>
 
 export async function executeTool(
+  name: string,
+  args: Record<string, unknown>,
+  sessions: SessionController,
+  ctx: ToolContext,
+  focus?: FocusHandler,
+): Promise<ToolResult> {
+  voiceLog("tool", { name, args })
+  try {
+    const result = await runTool(name, args, sessions, ctx, focus)
+    voiceLog("tool ok", { name, output: result.output })
+    return result
+  } catch (error) {
+    voiceLog("tool error", { name, error: error instanceof Error ? error.message : String(error) })
+    throw error
+  }
+}
+
+async function runTool(
   name: string,
   args: Record<string, unknown>,
   sessions: SessionController,
@@ -116,12 +149,22 @@ export async function executeTool(
     case "create_session": {
       const title = typeof args.title === "string" ? args.title : undefined
       const directory = typeof args.directory === "string" ? args.directory : undefined
+      const prompt = typeof args.prompt === "string" ? args.prompt : undefined
       const created = await sessions.create({ title, directory })
       const warning =
         !directory && ctx.warnSharedCheckout
           ? "This worker shares the same checkout as other sessions. Parallel file edits may collide."
           : undefined
-      return { name, output: { ...created, warning } }
+      let prompted = false
+      if (prompt?.trim()) {
+        await sessions.prompt(created.id, prompt)
+        prompted = true
+      }
+      let focused = false
+      if (focus) {
+        focused = Boolean(await focus(created.id, created.directory))
+      }
+      return { name, output: { ...created, warning, focused, prompted } }
     }
     case "prompt_session": {
       const sessionId = sessions.resolve(String(args.session_id), ctx.currentSessionId)
@@ -150,8 +193,9 @@ export async function executeTool(
     case "focus_session": {
       const sessionId = sessions.resolve(String(args.session_id), ctx.currentSessionId)
       if (!focus) return { name, output: { focused: false, reason: "TUI focus is unavailable" } }
-      const focused = await focus(sessionId)
-      return { name, output: { focused, sessionId } }
+      const directory = sessions.directoryOf(sessionId)
+      const focused = await focus(sessionId, directory)
+      return { name, output: { focused, sessionId, directory } }
     }
     default:
       throw new Error(`Unknown tool: ${name}`)

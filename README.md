@@ -1,6 +1,6 @@
 # Voice coding inside OpenCode
 
-An OpenCode plugin that adds a live **OpenAI Realtime** voice supervisor. You talk in the TUI. It talks back. It drives **multiple OpenCode sessions** that do the actual coding. No browser.
+An OpenCode plugin that adds a live **OpenAI GPT-Live / Realtime** voice supervisor. You talk in the TUI. It talks back. It drives **multiple OpenCode sessions** that do the actual coding. No browser. Voice audio and the OpenAI socket run in a **background daemon**, so changing OpenCode sessions or projects does not stop it.
 
 Chip in the prompt row: `○ voice` / `● VOICE` / `● listening`.
 
@@ -18,8 +18,8 @@ opencode
 
 Quit OpenCode fully (`ctrl+c`) and start it again from this repo root. You should see:
 
-- a toast: `○ voice is in the prompt row`
+- a toast: `Click ○ voice, or ctrl+p then Voice`
 - `○ voice` on the right of the prompt
-- `/voice` in slash autocomplete (same list as `/review`)
+- Voice commands in `ctrl+p` (type “Voice”) and `/voice` next to `/review` if the prompt slash list picks them up
 
 Then `/voice` or `Ctrl+Shift+V`. Details: [opencode-voice-supervisor/README.md](opencode-voice-supervisor/README.md).

@@ -1,9 +1,9 @@
 import { Buffer } from "node:buffer"
 import WebSocket from "ws"
 import { SUPERVISOR_INSTRUCTIONS } from "./instructions.ts"
-import { executeTool, parseToolArgs, REALTIME_TOOLS, type FocusHandler } from "./tools.ts"
+import { executeTool, parseToolArgs, REALTIME_TOOLS, resolveToolContext, type FocusHandler, type ToolContextInput } from "./tools.ts"
 import type { SessionController } from "./sessions.ts"
-import type { VoiceOptions } from "./types.ts"
+import { DEFAULT_MODEL, DEFAULT_VOICE, SAMPLE_RATE, type VoiceOptions } from "./types.ts"
 
 export type RealtimeEvent = {
   type: string
@@ -17,7 +17,7 @@ export type RealtimeHandlers = {
   onSpeechStarted?: () => void
   onSpeechStopped?: () => void
   onAudioDelta?: (pcm: Buffer) => void
-  onAudioDone?: () => void
+  onAudioDone?: () => void | Promise<void>
   onTranscript?: (role: "user" | "assistant", text: string) => void
   onTool?: (name: string, args: Record<string, unknown>) => Promise<unknown>
 }
@@ -25,10 +25,12 @@ export type RealtimeHandlers = {
 export type RealtimeSession = {
   sendAudio: (pcm: Buffer) => void
   injectText: (text: string, speak?: boolean) => void
+  muteInput?: () => void
+  unmuteInput?: () => void
   close: () => void
 }
 
-type SocketLike = {
+export type SocketLike = {
   readyState: number
   send: (data: string) => void
   close: () => void
@@ -37,6 +39,15 @@ type SocketLike = {
 }
 
 const OPEN = 1
+
+function isBenignRealtimeError(message: string) {
+  const text = message.toLowerCase()
+  return (
+    text.includes("cancellation failed") ||
+    text.includes("no active response") ||
+    text.includes("output_audio_buffer")
+  )
+}
 
 function attach(socket: SocketLike, handlers: { message: (raw: string) => void; close: () => void; error: (err: string) => void }) {
   if (typeof socket.addEventListener === "function") {
@@ -58,23 +69,37 @@ function attach(socket: SocketLike, handlers: { message: (raw: string) => void; 
   })
 }
 
-export function sessionUpdatePayload(options: Pick<VoiceOptions, "voice" | "instructions">) {
+export function realtimeConnectConfig(options: { apiKey: string; model: string }) {
+  return {
+    url: `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(options.model)}`,
+    headers: {
+      Authorization: `Bearer ${options.apiKey}`,
+    },
+  }
+}
+
+export function sessionUpdatePayload(options: Pick<VoiceOptions, "model" | "voice" | "instructions">) {
   return {
     type: "session.update",
     session: {
+      type: "realtime",
+      model: options.model ?? DEFAULT_MODEL,
       instructions: options.instructions ?? SUPERVISOR_INSTRUCTIONS,
-      voice: options.voice ?? "marin",
-      modalities: ["text", "audio"],
-      input_audio_format: "pcm16",
-      output_audio_format: "pcm16",
-      input_audio_transcription: { model: "whisper-1" },
-      turn_detection: {
-        type: "server_vad",
-        threshold: 0.5,
-        prefix_padding_ms: 300,
-        silence_duration_ms: 500,
-        interrupt_response: true,
-        create_response: true,
+      output_modalities: ["audio"],
+      audio: {
+        input: {
+          format: { type: "audio/pcm", rate: SAMPLE_RATE },
+          transcription: { model: "gpt-4o-mini-transcribe" },
+          turn_detection: {
+            type: "semantic_vad",
+            interrupt_response: true,
+            create_response: true,
+          },
+        },
+        output: {
+          format: { type: "audio/pcm", rate: SAMPLE_RATE },
+          voice: options.voice ?? DEFAULT_VOICE,
+        },
       },
       tools: REALTIME_TOOLS,
       tool_choice: "auto",
@@ -86,7 +111,7 @@ export function createRealtimeSession(
   socket: SocketLike,
   handlers: RealtimeHandlers,
   sessions?: SessionController,
-  toolCtx?: { currentSessionId?: string; warnSharedCheckout?: boolean },
+  toolCtx?: ToolContextInput,
   focus?: FocusHandler,
 ): RealtimeSession {
   const send = (payload: unknown) => {
@@ -94,13 +119,17 @@ export function createRealtimeSession(
     socket.send(JSON.stringify(payload))
   }
 
+  const seenCalls = new Set<string>()
+
   const handleToolCall = async (name: string, callId: string, args: Record<string, unknown>) => {
+    if (!name || !callId || seenCalls.has(callId)) return
+    seenCalls.add(callId)
     let output: unknown
     try {
       if (handlers.onTool) {
         output = await handlers.onTool(name, args)
       } else if (sessions) {
-        output = (await executeTool(name, args, sessions, toolCtx ?? {}, focus)).output
+        output = (await executeTool(name, args, sessions, resolveToolContext(toolCtx), focus)).output
       } else {
         throw new Error("No tool host configured")
       }
@@ -133,13 +162,13 @@ export function createRealtimeSession(
           break
         case "error": {
           const error = event.error as { message?: string } | undefined
-          handlers.onError?.(error?.message ?? "Realtime error")
+          const message = error?.message ?? "Realtime error"
+          if (isBenignRealtimeError(message)) break
+          handlers.onError?.(message)
           break
         }
         case "input_audio_buffer.speech_started":
           handlers.onSpeechStarted?.()
-          send({ type: "output_audio_buffer.clear" })
-          send({ type: "response.cancel" })
           break
         case "input_audio_buffer.speech_stopped":
           handlers.onSpeechStopped?.()
@@ -152,7 +181,7 @@ export function createRealtimeSession(
         }
         case "response.output_audio.done":
         case "response.audio.done":
-          handlers.onAudioDone?.()
+          void handlers.onAudioDone?.()
           break
         case "conversation.item.input_audio_transcription.completed": {
           const transcript = typeof event.transcript === "string" ? event.transcript : ""
@@ -173,6 +202,14 @@ export function createRealtimeSession(
           const callId = String(event.call_id ?? "")
           const args = parseToolArgs(typeof event.arguments === "string" ? event.arguments : undefined)
           void handleToolCall(name, callId, args)
+          break
+        }
+        case "response.output_item.done": {
+          const item = event.item as
+            | { type?: string; call_id?: string; name?: string; arguments?: string }
+            | undefined
+          if (item?.type !== "function_call" || !item.name || !item.call_id) break
+          void handleToolCall(item.name, item.call_id, parseToolArgs(item.arguments))
           break
         }
         default:
@@ -212,11 +249,7 @@ export function createRealtimeSession(
 }
 
 export async function connectRealtimeSocket(options: { apiKey: string; model: string }): Promise<SocketLike> {
-  const url = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(options.model)}`
-  const headers = {
-    Authorization: `Bearer ${options.apiKey}`,
-    "OpenAI-Beta": "realtime=v1",
-  }
+  const { url, headers } = realtimeConnectConfig(options)
 
   const globalWs = (globalThis as { WebSocket?: new (url: string, extra?: unknown) => SocketLike }).WebSocket
   if (globalWs && process.versions.bun) {
@@ -236,9 +269,10 @@ export function openRealtime(options: {
   model: string
   voice: string
   instructions?: string
+  backendModel?: string
   handlers: RealtimeHandlers
   sessions?: SessionController
-  toolCtx?: { currentSessionId?: string; warnSharedCheckout?: boolean }
+  toolCtx?: ToolContextInput
   focus?: FocusHandler
   socket?: SocketLike
 }): Promise<RealtimeSession> {
@@ -250,16 +284,36 @@ export function openRealtime(options: {
     }
     const waitOpen = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error("Realtime connection timed out")), 8000)
-      const trySend = () => {
-        if (socket.readyState === OPEN) {
-          send(sessionUpdatePayload({ voice: options.voice, instructions: options.instructions }))
+      let sent = false
+      const sendUpdate = () => {
+        if (sent || socket.readyState !== OPEN) return
+        sent = true
+        send(sessionUpdatePayload({ model: options.model, voice: options.voice, instructions: options.instructions }))
+      }
+      const onMessage = (raw: unknown) => {
+        const text = typeof raw === "string" ? raw : Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw)
+        let event: RealtimeEvent
+        try {
+          event = JSON.parse(text) as RealtimeEvent
+        } catch {
+          return
+        }
+        if (event.type === "session.created") sendUpdate()
+        if (event.type === "session.updated") {
           clearTimeout(timer)
           resolve()
         }
+        if (event.type === "error") {
+          const error = event.error as { message?: string } | undefined
+          clearTimeout(timer)
+          reject(new Error(error?.message ?? "Realtime error"))
+        }
       }
-      trySend()
-      socket.on?.("open", trySend)
-      socket.addEventListener?.("open", () => trySend())
+      socket.on?.("message", onMessage)
+      socket.addEventListener?.("message", (event) => onMessage(event.data))
+      sendUpdate()
+      socket.on?.("open", sendUpdate)
+      socket.addEventListener?.("open", () => sendUpdate())
     })
     await waitOpen
     return session

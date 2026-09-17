@@ -12,6 +12,14 @@ export function stateFilePath(): string {
   return join(homedir(), ".local/share/opencode/voice-supervisor/state.json")
 }
 
+export function daemonSockPath() {
+  return process.env.VOICE_SOCK ?? stateFilePath().replace(/state\.json$/, "voice.sock")
+}
+
+export function daemonPidPath() {
+  return stateFilePath().replace(/state\.json$/, "voice.pid")
+}
+
 export function persistVoiceState(state: VoiceUiState): void {
   const file = stateFilePath()
   mkdirSync(dirname(file), { recursive: true })

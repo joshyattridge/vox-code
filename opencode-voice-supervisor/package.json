@@ -1,7 +1,7 @@
 {
   "name": "opencode-voice-supervisor",
   "version": "0.1.0",
-  "description": "In-process OpenAI Realtime voice supervisor for OpenCode. Talk to a live voice agent; it drives multiple OpenCode coding sessions.",
+  "description": "Background OpenAI voice supervisor for OpenCode. Talk to a live voice agent; it drives multiple OpenCode coding sessions without sharing the TUI process.",
   "type": "module",
   "license": "MIT",
   "engines": {
@@ -18,7 +18,7 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node --experimental-strip-types --test test/auth.test.ts test/persist.test.ts test/realtime.test.ts test/status.test.ts test/supervisor.test.ts test/tools.test.ts test/tui-config.test.ts",
+    "test": "node --experimental-strip-types --test test/audio.test.ts test/auth.test.ts test/daemon.test.ts test/focus.test.ts test/live.test.ts test/paths.test.ts test/persist.test.ts test/protocol.test.ts test/realtime.test.ts test/status.test.ts test/supervisor.test.ts test/tools.test.ts test/tui-config.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

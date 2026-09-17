@@ -2,7 +2,7 @@
 
 Talk to OpenCode. It talks back. Worker sessions write the code.
 
-This is an **in-process OpenCode plugin**. There is no browser tab and no localhost webpage. OpenAI Realtime runs over a WebSocket inside OpenCode. The TUI shows a chip next to the prompt:
+This is an **OpenCode plugin** with a **background voice daemon**. There is no browser tab and no localhost webpage. OpenAI Realtime / GPT-Live run over a WebSocket in a detached process so OpenCode session and project switches cannot mute the speakers or tear down the mic. The TUI shows a chip next to the prompt:
 
 - `○ voice` off
 - `● VOICE` connected
@@ -72,7 +72,8 @@ Absolute paths work too. The package exports `./server` and `./tui`; a TUI file 
 
 | Action | How |
 |---|---|
-| Toggle voice | `/voice` or `Ctrl+Shift+V` or click the chip |
+| Toggle voice | Click `○ voice`, `Ctrl+Shift+V`, `ctrl+p` → Voice: toggle, or `/voice` |
+| Choose voice model | `ctrl+p` → Voice: model, or `/voice-model` (`gpt-live-1` or Realtime) |
 | Start / stop | `/voice-on` `/voice-off` |
 | Mute mic | `/voice-mute` `/voice-unmute` |
 | Status toast | `/voice-status` |
@@ -94,24 +95,29 @@ Plugin options in `opencode.json`, or env vars:
 
 | Option | Env | Default |
 |---|---|---|
-| `model` | `OPENAI_REALTIME_MODEL` | `gpt-realtime` |
+| `model` | `OPENAI_REALTIME_MODEL` | `gpt-realtime` (or pick `gpt-live-1` with `/voice-model`) |
+| `backendModel` | `OPENAI_LIVE_BACKEND_MODEL` | `gpt-5.6-luna` (used only with GPT-Live) |
 | `voice` | `OPENAI_REALTIME_VOICE` | `marin` |
 | `keybind` | | `ctrl+shift+v` |
 | `apiKey` | | optional override; otherwise OpenCode auth / `OPENAI_API_KEY` |
 
-Realtime audio is billed by OpenAI. The mic is live whenever the chip is not `○ voice` or `● muted`.
+Realtime and GPT-Live audio is billed by OpenAI. `gpt-live-1` is **$0.05/min** for the voice layer; the delegated backend model is billed separately. The mic is live whenever the chip is not `○ voice` or `● muted`.
+
+The OpenCode model picker (the one that switches Qwen / Claude / GPT) is for **coding sessions**. Voice uses `/voice-model`. Pick **gpt-live-1** for the new full-duplex Live model, or a `gpt-realtime*` id for the older Realtime API.
 
 ## How it is wired
 
 ```
-Mic/speakers (sox or arecord/aplay)
+Mic/speakers (sox or ffplay)
         ↕ PCM16 24kHz
-TUI plugin  +  server plugin
-        ↕ WebSocket
-OpenAI Realtime (talk / listen / tools)
-        ↕ create_session, prompt_session, ...
+Voice daemon (background process: WebSocket + audio)
+        ↕ unix socket ~/.local/share/opencode/voice-supervisor/voice.sock
+TUI chip / commands  (disconnects on session switch; does not stop voice)
+        ↕ HTTP
 OpenCode worker sessions
 ```
+
+Switching OpenCode sessions or projects unloads the TUI plugin. That only disconnects the chip. `/voice-off` is what actually stops the voice model. With the plugin installed globally, the chip comes back in the new folder.
 
 Tools the voice model can call: `list_sessions`, `create_session`, `prompt_session` (non-blocking), `abort_session`, `session_status`, `reply_permission`, `focus_session`.
 

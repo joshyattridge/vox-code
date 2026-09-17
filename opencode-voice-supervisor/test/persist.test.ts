@@ -12,7 +12,7 @@ test("persisted state includes the chip label", () => {
     lastUserTranscript: "write tests",
   })
   const saved = readPersistedVoiceState()
-  assert.equal(saved.chip, "● listening")
+  assert.equal(saved.chip, "● VOICE")
   assert.equal(saved.ownedSessionIds[0], "ses_1")
   assert.equal(typeof saved.updatedAt, "number")
   const file = stateFilePath()

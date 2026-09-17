@@ -22,10 +22,26 @@ test("tui.json lists the TUI plugin so OpenCode shows the chip and /voice", () =
 })
 
 test("tui plugin registers palette slash commands", () => {
-  const source = readFileSync(join(root, "opencode-voice-supervisor/src/tui.tsx"), "utf8")
+  const source = [
+    readFileSync(join(root, "opencode-voice-supervisor/src/tui.tsx"), "utf8"),
+    readFileSync(join(root, "opencode-voice-supervisor/src/focus.ts"), "utf8"),
+  ].join("\n")
   assert.match(source, /keymap\.registerLayer/)
   assert.match(source, /slashName: "voice"/)
+  assert.match(source, /command\?\.register/)
+  assert.match(source, /slash: \{ name: "voice" \}/)
   assert.match(source, /namespace: "palette"/)
+  assert.match(source, /LIVE_MODELS/)
+  assert.match(source, /gpt-live-1/)
   assert.match(source, /session_prompt_right/)
   assert.match(source, /home_prompt_right/)
+  assert.match(source, /focusTuiSession/)
+  assert.match(source, /navigated session route/)
+  assert.match(source, /tui\.selectSession/)
+  assert.match(source, /tui\.session\.select/)
+  assert.match(source, /attachVoiceDaemon/)
+  assert.match(source, /tui disconnect keep-alive/)
+  assert.doesNotMatch(source, /skip focus other project/)
+  assert.doesNotMatch(source, /rebindAudio/)
+  assert.doesNotMatch(source, /createVoiceSupervisor/)
 })
