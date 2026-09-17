@@ -22,4 +22,4 @@ Quit OpenCode fully (`ctrl+c`) and start it again from this repo root. You shoul
 - `○ voice` on the right of the prompt
 - Voice commands in `ctrl+p` (type “Voice”) and `/voice` next to `/review` if the prompt slash list picks them up
 
-Then `/voice` or `Ctrl+Shift+V`. Details: [opencode-voice-supervisor/README.md](opencode-voice-supervisor/README.md).
+Then `/voice` or `Ctrl+Shift+V`. `/voice-voice` picks a speaker with a sample. `/voice-prompt` edits how it talks. Details: [opencode-voice-supervisor/README.md](opencode-voice-supervisor/README.md).

@@ -171,6 +171,128 @@ test("setModel can switch to gpt-live-1", async () => {
   assert.deepEqual(models, ["gpt-live-1"])
 })
 
+test("setVoice updates the speaker without starting voice", async () => {
+  const voices: string[] = []
+  const supervisor = createVoiceSupervisor({
+    client,
+    options: { apiKey: "sk-test", voice: "marin" },
+    audio: new MemoryAudio(),
+    connect: async () => ({ sendAudio() {}, injectText() {}, close() {} }),
+    hooks: { onVoiceChange: (voice) => voices.push(voice) },
+  })
+  assert.equal(supervisor.voice(), "marin")
+  await supervisor.setVoice("cedar")
+  assert.equal(supervisor.voice(), "cedar")
+  assert.equal(supervisor.state().phase, "off")
+  assert.deepEqual(voices, ["cedar"])
+})
+
+test("setVoice reconnects when voice is already on", async () => {
+  let connects = 0
+  let usedVoice = ""
+  const supervisor = createVoiceSupervisor({
+    client,
+    options: { apiKey: "sk-test", voice: "marin" },
+    audio: new MemoryAudio(),
+    connect: async (options) => {
+      connects += 1
+      usedVoice = options.voice
+      return { sendAudio() {}, injectText() {}, close() {} }
+    },
+  })
+  await supervisor.start()
+  assert.equal(connects, 1)
+  await supervisor.setVoice("coral")
+  assert.equal(supervisor.voice(), "coral")
+  assert.equal(usedVoice, "coral")
+  assert.equal(connects, 2)
+  await supervisor.stop()
+})
+
+test("setInstructions saves a custom spoken prompt", async () => {
+  const saved: Array<string | undefined> = []
+  let used: string | undefined
+  const supervisor = createVoiceSupervisor({
+    client,
+    options: { apiKey: "sk-test" },
+    audio: new MemoryAudio(),
+    connect: async (options) => {
+      used = options.instructions
+      return { sendAudio() {}, injectText() {}, close() {} }
+    },
+    hooks: { onInstructionsChange: (text) => saved.push(text) },
+  })
+  await supervisor.setInstructions("Talk like a dry British butler. Keep it to one sentence.")
+  assert.match(supervisor.instructions() ?? "", /British butler/)
+  assert.match(supervisor.statusText(), /prompt: custom/)
+  assert.equal(saved.at(-1)?.includes("butler"), true)
+  await supervisor.start()
+  assert.match(used ?? "", /British butler/)
+  await supervisor.stop()
+  await supervisor.setInstructions(undefined)
+  assert.equal(supervisor.instructions(), undefined)
+  assert.match(supervisor.statusText(), /prompt: default/)
+})
+
+test("previewVoice plays a TTS sample through speakers", async () => {
+  const audio = new MemoryAudio()
+  const fetched: string[] = []
+  const supervisor = createVoiceSupervisor({
+    client,
+    options: { apiKey: "sk-test" },
+    audio,
+    connect: async () => ({ sendAudio() {}, injectText() {}, close() {} }),
+    fetchSpeech: async ({ voice }) => {
+      fetched.push(voice)
+      return Buffer.from("sample")
+    },
+  })
+  await supervisor.previewVoice("cedar")
+  assert.deepEqual(fetched, ["cedar"])
+  assert.equal(audio.played[0]?.toString(), "sample")
+})
+
+test("double toggle while connecting only starts once", async () => {
+  let connects = 0
+  const supervisor = createVoiceSupervisor({
+    client,
+    options: { apiKey: "sk-test" },
+    audio: new MemoryAudio(),
+    connect: async () => {
+      connects += 1
+      await new Promise((resolve) => setTimeout(resolve, 40))
+      return { sendAudio() {}, injectText() {}, close() {} }
+    },
+  })
+  await Promise.all([supervisor.toggle(), supervisor.toggle(), supervisor.toggle()])
+  assert.equal(connects, 1)
+  assert.equal(supervisor.state().phase, "connected")
+  assert.equal(supervisor.chip(), "● VOICE")
+  await supervisor.stop()
+  assert.equal(supervisor.chip(), "○ voice")
+})
+
+test("audio after stop does not flip the chip back on", async () => {
+  let onAudioDelta: ((pcm: Buffer) => void) | undefined
+  const supervisor = createVoiceSupervisor({
+    client,
+    options: { apiKey: "sk-test" },
+    audio: new MemoryAudio(),
+    connect: async (options) => {
+      onAudioDelta = options.handlers.onAudioDelta
+      return { sendAudio() {}, injectText() {}, close() {} }
+    },
+  })
+  await supervisor.start()
+  onAudioDelta?.(Buffer.from([1, 2]))
+  assert.equal(supervisor.chip(), "● VOICE")
+  await supervisor.stop()
+  assert.equal(supervisor.state().phase, "off")
+  onAudioDelta?.(Buffer.from([3, 4]))
+  assert.equal(supervisor.state().phase, "off")
+  assert.equal(supervisor.chip(), "○ voice")
+})
+
 test("live models keep the microphone open while the assistant is speaking", async () => {
   const audio = new MemoryAudio()
   const sent: number[] = []

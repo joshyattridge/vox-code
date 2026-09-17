@@ -25,6 +25,7 @@ const server: PluginModule["server"] = async (input, options) => {
             `realtime: ${state.realtimeConnected ? "connected" : "down"}`,
             `model: ${resolved.model}`,
             `voice: ${resolved.voice}`,
+            `prompt: ${resolved.instructions ? "custom" : "default"}`,
             `owned sessions: ${state.ownedSessionIds.length ? state.ownedSessionIds.join(", ") : "(none)"}`,
             state.lastUserTranscript ? `heard: ${state.lastUserTranscript}` : undefined,
             state.lastAssistantTranscript ? `said: ${state.lastAssistantTranscript}` : undefined,

@@ -5,16 +5,17 @@ export type ClientConfig = {
   headers?: Record<string, string>
 }
 
-export const VOICE_PROTOCOL = 6
+export const VOICE_PROTOCOL = 7
 
 export type UpMessage =
   | { type: "hello"; directory?: string; options?: Record<string, unknown>; client?: ClientConfig; sessionId?: string }
   | { type: "start" }
   | { type: "stop"; silent?: boolean }
   | { type: "toggle" }
-  | { type: "mute" }
-  | { type: "unmute" }
   | { type: "setModel"; model: string }
+  | { type: "setVoice"; voice: string }
+  | { type: "setInstructions"; instructions?: string }
+  | { type: "previewVoice"; voice: string }
   | { type: "idle"; sessionId: string }
   | { type: "sessionError"; sessionId: string; message: string }
   | { type: "permission"; sessionId: string; permissionId: string; title: string }
@@ -24,7 +25,7 @@ export type UpMessage =
 
 export type DownMessage =
   | { type: "ready"; protocol?: number }
-  | { type: "state"; state: VoiceUiState; model: string; statusText: string }
+  | { type: "state"; state: VoiceUiState; model: string; voice: string; instructions?: string; statusText: string }
   | { type: "toast"; message: string; variant?: "info" | "success" | "warning" | "error" }
   | { type: "focus"; sessionId: string; directory?: string }
   | { type: "rpc"; id: string; op: string; params?: unknown }

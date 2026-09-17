@@ -7,7 +7,6 @@ test("persisted state includes the chip label", () => {
   persistVoiceState({
     phase: "listening",
     realtimeConnected: true,
-    muted: false,
     ownedSessionIds: ["ses_1"],
     lastUserTranscript: "write tests",
   })
@@ -18,4 +17,15 @@ test("persisted state includes the chip label", () => {
   const file = stateFilePath()
   assert.equal(JSON.parse(readFileSync(file, "utf8")).phase, "listening")
   assert.ok(file.includes("voice-supervisor"))
+})
+
+test("stale speaking state without a live socket is stored as off", () => {
+  persistVoiceState({
+    phase: "speaking",
+    realtimeConnected: false,
+    ownedSessionIds: [],
+  })
+  const saved = readPersistedVoiceState()
+  assert.equal(saved.phase, "off")
+  assert.equal(saved.chip, "○ voice")
 })

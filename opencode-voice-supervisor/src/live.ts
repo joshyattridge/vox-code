@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer"
 import WebSocket from "ws"
-import { LIVE_BACKEND_INSTRUCTIONS, LIVE_VOICE_INSTRUCTIONS } from "./instructions.ts"
+import { LIVE_BACKEND_INSTRUCTIONS, resolveSpokenInstructions } from "./instructions.ts"
 import { voiceLog } from "./log.ts"
 import type { RealtimeHandlers, RealtimeSession, SocketLike } from "./realtime.ts"
 import type { SessionController } from "./sessions.ts"
@@ -56,7 +56,7 @@ export function sessionStartPayload(
     event_id: "event_start",
     session: {
       model: options.model ?? "gpt-live-1",
-      instructions: options.instructions ?? LIVE_VOICE_INSTRUCTIONS,
+      instructions: resolveSpokenInstructions(options.model, options.instructions),
       audio: {
         format: { type: "audio/pcm", rate: SAMPLE_RATE },
         output: { voice: options.voice ?? DEFAULT_VOICE },
@@ -240,12 +240,6 @@ export function createLiveSession(
         delegation_id: null,
         content: text.slice(0, 2000),
       })
-    },
-    muteInput() {
-      send({ type: "session.input_audio.mute" })
-    },
-    unmuteInput() {
-      send({ type: "session.input_audio.unmute" })
     },
     close() {
       if (audioGap) clearTimeout(audioGap)

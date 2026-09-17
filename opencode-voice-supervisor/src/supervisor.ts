@@ -1,16 +1,20 @@
 import { resolveOpenAiApiKey, type ResolvedApiKey } from "./auth.ts"
-import { detectAudio, type AudioIO } from "./audio.ts"
+import { detectAudio, playPcmClip, type AudioIO } from "./audio.ts"
 import { persistVoiceState } from "./persist.ts"
 import { voiceLog } from "./log.ts"
 import { createSessionController, type SessionController } from "./sessions.ts"
 import { openLive } from "./live.ts"
+import { fetchVoiceSamplePcm } from "./preview.ts"
+import { defaultSpokenInstructions, resolveSpokenInstructions } from "./instructions.ts"
 import { openRealtime, type RealtimeSession } from "./realtime.ts"
 import {
   CUSTOM_REALTIME_MODEL,
   chipLabel,
   initialVoiceState,
   isLiveModel,
+  normalizeVoiceState,
   resolveOptions,
+  voiceMeta,
   type VoiceOptions,
   type VoiceUiState,
 } from "./types.ts"
@@ -22,19 +26,24 @@ export type SupervisorHooks = {
   focusSession?: FocusHandler
   currentSessionId?: () => string | undefined
   onModelChange?: (model: string) => void
+  onVoiceChange?: (voice: string) => void
+  onInstructionsChange?: (instructions?: string) => void
 }
 
 export type VoiceSupervisor = {
   state: () => VoiceUiState
   model: () => string
+  voice: () => string
+  instructions: () => string | undefined
   chip: () => string
   subscribe: (listener: () => void) => () => void
   start: () => Promise<void>
   stop: (opts?: { silent?: boolean }) => Promise<void>
   toggle: () => Promise<void>
-  mute: () => Promise<void>
-  unmute: () => Promise<void>
   setModel: (model: string) => Promise<void>
+  setVoice: (voice: string) => Promise<void>
+  setInstructions: (instructions?: string) => Promise<void>
+  previewVoice: (voice: string) => Promise<void>
   statusText: () => string
   handleIdle: (sessionId: string) => void
   handleError: (sessionId: string, message: string) => void
@@ -65,6 +74,7 @@ export function createVoiceSupervisor(input: {
   hooks?: SupervisorHooks
   connect?: typeof openRealtime | typeof openLive
   resolveKey?: () => ResolvedApiKey | Promise<ResolvedApiKey>
+  fetchSpeech?: typeof fetchVoiceSamplePcm
 }): VoiceSupervisor {
   let options = resolveOptions(input.options as Record<string, unknown> | undefined)
   const directoryOf = () =>
@@ -89,7 +99,7 @@ export function createVoiceSupervisor(input: {
   }
 
   const setState = (patch: Partial<VoiceUiState>) => {
-    state = { ...state, ...patch, ownedSessionIds: sessions.ownedIds() }
+    state = normalizeVoiceState({ ...state, ...patch, ownedSessionIds: sessions.ownedIds() })
     notify()
   }
 
@@ -144,12 +154,15 @@ export function createVoiceSupervisor(input: {
   }
 
   const sendMic = (chunk: Buffer) => {
-    if (state.muted) return
     realtime?.sendAudio(chunk)
   }
 
+  const sessionActive = () => Boolean(realtime) && !stopping && state.phase !== "off"
+
   const start = async () => {
-    if (starting || state.realtimeConnected) return
+    if (starting || stopping || state.realtimeConnected || sessionActive()) return
+    starting = true
+    stopping = false
     const resolvedKey = await (input.resolveKey ??
       (() =>
         resolveOpenAiApiKey({
@@ -157,13 +170,12 @@ export function createVoiceSupervisor(input: {
           directory: directoryOf(),
         })))()
     if (!resolvedKey.key) {
-      setState({ phase: "error", error: resolvedKey.hint })
+      starting = false
+      setState({ phase: "error", error: resolvedKey.hint, realtimeConnected: false })
       toast(resolvedKey.hint, "error")
       return
     }
     keySource = resolvedKey.source
-    starting = true
-    stopping = false
     setState({ phase: "connecting", error: undefined })
     try {
       audio = audio ?? detectAudio()
@@ -175,15 +187,16 @@ export function createVoiceSupervisor(input: {
         apiKey: resolvedKey.key,
         model: options.model,
         voice: options.voice,
-        instructions: options.instructions,
+        instructions: resolveSpokenInstructions(options.model, options.instructions),
         backendModel: options.backendModel,
         sessions,
         toolCtx,
         focus: input.hooks?.focusSession,
         handlers: {
           onOpen: () => {
+            if (stopping) return
             voiceLog("connected", options.model)
-            setState({ phase: state.muted ? "muted" : "connected", realtimeConnected: true })
+            setState({ phase: "connected", realtimeConnected: true })
             toast("Voice connected.", "success")
           },
           onClose: () => {
@@ -194,31 +207,32 @@ export function createVoiceSupervisor(input: {
           },
           onError: (message) => {
             voiceLog("error", message)
-            if (isBenignVoiceError(message)) return
+            if (stopping || isBenignVoiceError(message)) return
             setState({ phase: "error", error: message, realtimeConnected: false })
             toast(message, "error")
           },
           onSpeechStarted: () => {
-            if (!state.muted && state.phase !== "speaking") setState({ phase: "listening" })
+            if (!sessionActive() || state.phase === "speaking") return
+            setState({ phase: "listening" })
           },
           onSpeechStopped: () => {
-            if (!state.muted && state.realtimeConnected && !speaking) setState({ phase: "connected" })
+            if (!sessionActive() || speaking) return
+            setState({ phase: "connected" })
           },
           onAudioDelta: (pcm) => {
-            if (state.muted) return
+            if (!sessionActive()) return
             if (!speaking) playGeneration += 1
             speaking = true
-            if (state.phase !== "speaking") setState({ phase: "speaking" })
+            if (state.phase !== "speaking") setState({ phase: "speaking", realtimeConnected: true })
             void audio?.play(pcm)
           },
           onAudioDone: async () => {
             const generation = playGeneration
             await audio?.drainPlayback()
             await new Promise((resolve) => setTimeout(resolve, ECHO_HOLD_MS))
-            if (generation !== playGeneration) return
+            if (generation !== playGeneration || !sessionActive()) return
             speaking = false
-            if (state.muted) setState({ phase: "muted" })
-            else if (state.realtimeConnected) setState({ phase: "connected" })
+            if (state.realtimeConnected) setState({ phase: "connected" })
           },
           onTranscript: (role, text) => {
             if (role === "user") setState({ lastUserTranscript: text })
@@ -243,22 +257,43 @@ export function createVoiceSupervisor(input: {
   }
 
   const stop = async (opts?: { silent?: boolean; reason?: string }) => {
+    if (stopping && state.phase === "off" && !realtime) return
     voiceLog("stop", { reason: opts?.reason ?? "stop", phase: state.phase, silent: Boolean(opts?.silent) })
     stopping = true
+    starting = false
     speaking = false
+    playGeneration += 1
     stopIdlePoll()
     lastBusy.clear()
-    realtime?.close()
+    const session = realtime
     realtime = undefined
+    session?.close()
     await audio?.dispose().catch(() => undefined)
     if (!input.audio) audio = undefined
-    setState({ phase: "off", realtimeConnected: false, muted: false, error: undefined })
+    setState({ phase: "off", realtimeConnected: false, error: undefined })
+    stopping = false
     if (!opts?.silent) toast("Voice off.")
   }
+
+  const sessionLive = () =>
+    state.realtimeConnected ||
+    state.phase === "connecting" ||
+    state.phase === "listening" ||
+    state.phase === "speaking"
+
+  const restartIfLive = async (reason: string) => {
+    if (!sessionLive()) return
+    await stop({ silent: true, reason })
+    await start()
+  }
+
+  const displayVoice = (id: string) => voiceMeta(id)?.title ?? id
 
   return {
     state: () => state,
     model: () => options.model,
+    voice: () => options.voice,
+    instructions: () => options.instructions,
     chip: () => chipLabel(state),
     subscribe(listener) {
       listeners.add(listener)
@@ -267,6 +302,7 @@ export function createVoiceSupervisor(input: {
     start,
     stop,
     async toggle() {
+      if (starting || stopping) return
       if (state.phase === "off" || state.phase === "error") await start()
       else await stop({ reason: "toggle" })
     },
@@ -277,37 +313,70 @@ export function createVoiceSupervisor(input: {
         toast(`Voice model is already ${next}.`)
         return
       }
-      const live =
-        state.realtimeConnected ||
-        state.phase === "connecting" ||
-        state.phase === "listening" ||
-        state.phase === "speaking" ||
-        state.phase === "muted"
       options = { ...options, model: next }
       input.hooks?.onModelChange?.(next)
       toast(`Voice model: ${next}`)
       notify()
-      if (!live) return
-      await stop({ silent: true, reason: "model" })
-      await start()
+      await restartIfLive("model")
     },
-    async mute() {
-      speaking = false
-      state = { ...state, muted: true, phase: state.realtimeConnected ? "muted" : state.phase }
-      realtime?.muteInput?.()
-      await audio?.stopCapture()
-      await audio?.stopPlayback()
-      notify()
-    },
-    async unmute() {
-      if (!state.realtimeConnected) return
-      state = { ...state, muted: false, phase: speaking ? "speaking" : "connected" }
-      realtime?.unmuteInput?.()
-      if (audio) {
-        await audio.startCapture(sendMic)
-        await audio.startPlayback()
+    async setVoice(voice) {
+      const next = voice.trim()
+      if (!next) return
+      if (next === options.voice) {
+        toast(`Voice is already ${displayVoice(next)}.`)
+        return
       }
+      options = { ...options, voice: next }
+      input.hooks?.onVoiceChange?.(next)
+      toast(`Voice: ${displayVoice(next)}`)
       notify()
+      await restartIfLive("voice")
+    },
+    async setInstructions(instructions) {
+      const trimmed = instructions?.trim() || undefined
+      const next =
+        trimmed && trimmed !== defaultSpokenInstructions(options.model) ? trimmed : undefined
+      if ((options.instructions ?? undefined) === next) {
+        toast(next ? "Voice prompt unchanged." : "Voice prompt is already the default.")
+        return
+      }
+      options = { ...options, instructions: next }
+      input.hooks?.onInstructionsChange?.(next)
+      toast(next ? "Voice prompt saved." : "Voice prompt reset to default.")
+      notify()
+      await restartIfLive("prompt")
+    },
+    async previewVoice(voice) {
+      const next = voice.trim()
+      if (!next) return
+      const resolvedKey = await (input.resolveKey ??
+        (() =>
+          resolveOpenAiApiKey({
+            pluginKey: options.apiKey,
+            directory: directoryOf(),
+          })))()
+      if (!resolvedKey.key) {
+        toast(resolvedKey.hint, "error")
+        return
+      }
+      toast(`Playing ${displayVoice(next)}…`)
+      try {
+        const pcm = await (input.fetchSpeech ?? fetchVoiceSamplePcm)({
+          apiKey: resolvedKey.key,
+          voice: next,
+        })
+        if (input.audio) {
+          await input.audio.startPlayback()
+          await input.audio.play(pcm)
+          await input.audio.drainPlayback()
+          return
+        }
+        await playPcmClip(pcm)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        voiceLog("voice sample failed", message)
+        toast(message, "error")
+      }
     },
     statusText() {
       const owned = sessions.ownedIds()
@@ -317,6 +386,7 @@ export function createVoiceSupervisor(input: {
         `model: ${options.model}`,
         isLiveModel(options.model) ? `backend: ${options.backendModel}` : undefined,
         `voice: ${options.voice}`,
+        `prompt: ${options.instructions ? "custom" : "default"}`,
         `api key: ${keySource}`,
         `owned sessions: ${owned.length ? owned.join(", ") : "(none)"}`,
       ].filter((line): line is string => Boolean(line))

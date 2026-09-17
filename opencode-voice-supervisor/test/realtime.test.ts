@@ -34,6 +34,16 @@ test("session update uses the GA realtime shape", () => {
   assert.equal("modalities" in payload.session, false)
 })
 
+test("session update uses a custom spoken prompt when provided", () => {
+  const payload = sessionUpdatePayload({
+    voice: "coral",
+    model: "gpt-realtime",
+    instructions: "Talk like a pirate. Still dispatch coding sessions.",
+  })
+  assert.match(payload.session.instructions, /pirate/)
+  assert.equal(payload.session.audio.output.voice, "coral")
+})
+
 test("GA websocket connect does not send the retired beta header", () => {
   const config = realtimeConnectConfig({ apiKey: "sk-test", model: "gpt-realtime" })
   assert.equal(config.url, "wss://api.openai.com/v1/realtime?model=gpt-realtime")

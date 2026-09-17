@@ -88,6 +88,7 @@ export async function listenVoiceDaemon(input?: {
   let idleExit: ReturnType<typeof setTimeout> | undefined
   let unsub: (() => void) | undefined
   let closed = false
+  let commandQueue = Promise.resolve()
 
   const broadcast = (message: DownMessage) => {
     const payload = encodeMessage(message)
@@ -155,10 +156,13 @@ export async function listenVoiceDaemon(input?: {
 
   const snapshot = (): Extract<DownMessage, { type: "state" }> => {
     const state: VoiceUiState = supervisor?.state() ?? initialVoiceState()
+    const resolved = resolveOptions(options)
     return {
       type: "state",
       state,
-      model: supervisor?.model() ?? resolveOptions(options).model,
+      model: supervisor?.model() ?? resolved.model,
+      voice: supervisor?.voice() ?? resolved.voice,
+      instructions: supervisor?.instructions(),
       statusText: supervisor?.statusText() ?? `phase: ${state.phase}`,
     }
   }
@@ -211,9 +215,19 @@ export async function listenVoiceDaemon(input?: {
         if (message.client) httpConfig = message.client
         refreshClient()
         const voice = ensureSupervisor()
-        const nextModel = resolveOptions(message.options).model
-        if (nextModel && nextModel !== voice.model() && voice.state().phase === "off") {
-          await voice.setModel(nextModel)
+        const resolved = resolveOptions(message.options)
+        if (voice.state().phase === "off") {
+          if (resolved.model && resolved.model !== voice.model()) {
+            await voice.setModel(resolved.model)
+          }
+          if (resolved.voice && resolved.voice !== voice.voice()) {
+            await voice.setVoice(resolved.voice)
+          }
+          const nextInstructions = resolved.instructions?.trim() || undefined
+          const currentInstructions = voice.instructions()?.trim() || undefined
+          if (nextInstructions !== currentInstructions) {
+            await voice.setInstructions(nextInstructions)
+          }
         }
         socket.write(encodeMessage({ type: "ready", protocol: VOICE_PROTOCOL } satisfies DownMessage))
         socket.write(encodeMessage(snapshot()))
@@ -245,14 +259,17 @@ export async function listenVoiceDaemon(input?: {
         await ensureSupervisor().toggle()
         scheduleIdleExit()
         return
-      case "mute":
-        await ensureSupervisor().mute()
-        return
-      case "unmute":
-        await ensureSupervisor().unmute()
-        return
       case "setModel":
         await ensureSupervisor().setModel(message.model)
+        return
+      case "setVoice":
+        await ensureSupervisor().setVoice(message.voice)
+        return
+      case "setInstructions":
+        await ensureSupervisor().setInstructions(message.instructions)
+        return
+      case "previewVoice":
+        await ensureSupervisor().previewVoice(message.voice)
         return
       case "idle":
         ensureSupervisor().handleIdle(message.sessionId)
@@ -292,9 +309,11 @@ export async function listenVoiceDaemon(input?: {
       buffers.set(socket, rest)
       for (const message of messages) {
         if (!isUpMessage(message)) continue
-        void handle(socket, message).catch((error) => {
-          voiceLog("daemon command failed", error instanceof Error ? error.message : String(error))
-        })
+        commandQueue = commandQueue.then(() =>
+          handle(socket, message).catch((error) => {
+            voiceLog("daemon command failed", error instanceof Error ? error.message : String(error))
+          }),
+        )
       }
     })
     socket.on("close", () => {

@@ -6,7 +6,7 @@ This is an **OpenCode plugin** with a **background voice daemon**. There is no b
 
 - `○ voice` off
 - `● VOICE` connected
-- `● listening` / `● speaking` / `● muted` / `● error`
+- `● error`
 
 The realtime model is a **supervisor only**. It never edits the repo. It creates and prompts normal OpenCode sessions (Claude, GPT, or whatever you already configured).
 
@@ -74,10 +74,10 @@ Absolute paths work too. The package exports `./server` and `./tui`; a TUI file 
 |---|---|
 | Toggle voice | Click `○ voice`, `Ctrl+Shift+V`, `ctrl+p` → Voice: toggle, or `/voice` |
 | Choose voice model | `ctrl+p` → Voice: model, or `/voice-model` (`gpt-live-1` or Realtime) |
+| Choose speaker | `ctrl+p` → Voice: speaker, or `/voice-voice` (plays a sample, then applies) |
+| Edit speaking prompt | `ctrl+p` → Voice: prompt, or `/voice-prompt` |
 | Start / stop | `/voice-on` `/voice-off` |
-| Mute mic | `/voice-mute` `/voice-unmute` |
 | Status toast | `/voice-status` |
-| Status panel | `/voice-panel` |
 | From a coding session | ask the agent to run `voice_status` |
 
 Say things like:
@@ -97,13 +97,18 @@ Plugin options in `opencode.json`, or env vars:
 |---|---|---|
 | `model` | `OPENAI_REALTIME_MODEL` | `gpt-realtime` (or pick `gpt-live-1` with `/voice-model`) |
 | `backendModel` | `OPENAI_LIVE_BACKEND_MODEL` | `gpt-5.6-luna` (used only with GPT-Live) |
-| `voice` | `OPENAI_REALTIME_VOICE` | `marin` |
+| `voice` | `OPENAI_REALTIME_VOICE` | `marin` (pick others with `/voice-voice`; a sample plays when you select one) |
+| `instructions` | | spoken system prompt; default is `You are a voice assistant in OpenCode. Talk to the user out loud.` Edit with `/voice-prompt` |
 | `keybind` | | `ctrl+shift+v` |
 | `apiKey` | | optional override; otherwise OpenCode auth / `OPENAI_API_KEY` |
 
-Realtime and GPT-Live audio is billed by OpenAI. `gpt-live-1` is **$0.05/min** for the voice layer; the delegated backend model is billed separately. The mic is live whenever the chip is not `○ voice` or `● muted`.
+Realtime and GPT-Live audio is billed by OpenAI. `gpt-live-1` is **$0.05/min** for the voice layer; the delegated backend model is billed separately. The mic is live whenever the chip is `● VOICE`.
 
 The OpenCode model picker (the one that switches Qwen / Claude / GPT) is for **coding sessions**. Voice uses `/voice-model`. Pick **gpt-live-1** for the new full-duplex Live model, or a `gpt-realtime*` id for the older Realtime API.
+
+`/voice-voice` lists OpenAI Realtime speakers (`marin`, `cedar`, `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`). Each row includes a sample line. Selecting one plays that sample through your speakers, then keeps the voice. Marin and Cedar are the ones OpenAI recommends.
+
+`/voice-prompt` edits the **spoken** system prompt. The default is just: talk to the user out loud. Reset restores that. GPT-Live still uses a separate backend prompt for tool calls; that one is not user-editable.
 
 ## How it is wired
 

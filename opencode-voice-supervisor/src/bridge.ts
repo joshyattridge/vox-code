@@ -23,6 +23,8 @@ export type VoiceBridgeHooks = {
   toast?: (input: { title?: string; message: string; variant?: "info" | "success" | "warning" | "error" }) => void
   focusSession?: (sessionId: string, directory?: string) => boolean | Promise<boolean>
   onModelChange?: (model: string) => void
+  onVoiceChange?: (voice: string) => void
+  onInstructionsChange?: (instructions?: string) => void
 }
 
 function daemonFile() {
@@ -220,14 +222,18 @@ export async function attachVoiceDaemon(input: {
   const persisted = readPersistedVoiceState()
   let ui: VoiceUiState = {
     ...initialVoiceState(),
-    ...persisted,
+    lastUserTranscript: persisted.lastUserTranscript,
+    lastAssistantTranscript: persisted.lastAssistantTranscript,
     ownedSessionIds: persisted.ownedSessionIds ?? [],
   }
   let model = resolveOptions(input.options).model
+  let voice = resolveOptions(input.options).voice
+  let instructions = resolveOptions(input.options).instructions
   let statusText = `phase: ${ui.phase}`
   let buffer = ""
   let ready = false
   let protocol = 0
+  let gotState = false
 
   const notify = () => {
     for (const listener of listeners) listener()
@@ -261,9 +267,14 @@ export async function attachVoiceDaemon(input: {
         notify()
         return
       case "state":
+        gotState = true
         if (message.model !== model) input.hooks?.onModelChange?.(message.model)
+        if (message.voice !== voice) input.hooks?.onVoiceChange?.(message.voice)
+        if (message.instructions !== instructions) input.hooks?.onInstructionsChange?.(message.instructions)
         ui = message.state
         model = message.model
+        voice = message.voice
+        instructions = message.instructions
         statusText = message.statusText
         notify()
         return
@@ -321,6 +332,7 @@ export async function attachVoiceDaemon(input: {
     sessionId: input.sessionId,
   })
   await waitFor(() => ready, 4000)
+  await waitFor(() => gotState, 2000)
   if (protocol < VOICE_PROTOCOL && !input.replaced && !input.connect) {
     voiceLog("replacing old voice daemon", { protocol })
     socket.end()
@@ -336,11 +348,13 @@ export async function attachVoiceDaemon(input: {
   const supervisor: VoiceSupervisor = {
     state: () => ui,
     model: () => model,
+    voice: () => voice,
+    instructions: () => instructions,
     chip: () => chipLabel(ui),
     subscribe,
     async start() {
       send({ type: "start" })
-      await waitFor(() => ["connected", "listening", "speaking", "muted", "error"].includes(ui.phase))
+      await waitFor(() => ["connected", "listening", "speaking", "error"].includes(ui.phase))
     },
     async stop(opts) {
       send({ type: "stop", silent: opts?.silent })
@@ -351,17 +365,21 @@ export async function attachVoiceDaemon(input: {
       const wasOff = ui.phase === "off" || ui.phase === "error"
       await waitFor(() => (wasOff ? ui.phase !== "off" && ui.phase !== "connecting" : ui.phase === "off"))
     },
-    async mute() {
-      send({ type: "mute" })
-      await waitFor(() => ui.muted)
-    },
-    async unmute() {
-      send({ type: "unmute" })
-      await waitFor(() => !ui.muted)
-    },
     async setModel(next) {
       send({ type: "setModel", model: next })
       await waitFor(() => model === next.trim())
+    },
+    async setVoice(next) {
+      send({ type: "setVoice", voice: next })
+      await waitFor(() => voice === next.trim())
+    },
+    async setInstructions(next) {
+      send({ type: "setInstructions", instructions: next })
+      const expected = next?.trim() || undefined
+      await waitFor(() => (instructions?.trim() || undefined) === expected)
+    },
+    async previewVoice(next) {
+      send({ type: "previewVoice", voice: next })
     },
     statusText: () => statusText,
     handleIdle(sessionId) {

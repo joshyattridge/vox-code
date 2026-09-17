@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
-import { chipLabel, initialVoiceState, type VoiceUiState } from "./types.ts"
+import { chipLabel, initialVoiceState, normalizeVoiceState, type VoiceUiState } from "./types.ts"
 
 export type PersistedVoiceState = VoiceUiState & {
   chip: string
@@ -23,9 +23,10 @@ export function daemonPidPath() {
 export function persistVoiceState(state: VoiceUiState): void {
   const file = stateFilePath()
   mkdirSync(dirname(file), { recursive: true })
+  const normalized = normalizeVoiceState(state)
   const payload: PersistedVoiceState = {
-    ...state,
-    chip: chipLabel(state),
+    ...normalized,
+    chip: chipLabel(normalized),
     updatedAt: Date.now(),
   }
   writeFileSync(file, `${JSON.stringify(payload, null, 2)}\n`)
@@ -35,15 +36,17 @@ export function readPersistedVoiceState(): PersistedVoiceState {
   try {
     const parsed = JSON.parse(readFileSync(stateFilePath(), "utf8")) as Partial<PersistedVoiceState>
     const base = initialVoiceState()
-    return {
+    const normalized = normalizeVoiceState({
       ...base,
       ...parsed,
-      chip: parsed.chip ?? chipLabel({ ...base, ...parsed } as VoiceUiState),
-      updatedAt: parsed.updatedAt ?? 0,
       ownedSessionIds: parsed.ownedSessionIds ?? [],
       realtimeConnected: Boolean(parsed.realtimeConnected),
-      muted: Boolean(parsed.muted),
-      phase: parsed.phase ?? "off",
+      phase: (parsed.phase as string) === "muted" ? (parsed.realtimeConnected ? "connected" : "off") : parsed.phase ?? "off",
+    })
+    return {
+      ...normalized,
+      chip: chipLabel(normalized),
+      updatedAt: parsed.updatedAt ?? 0,
     }
   } catch {
     const base = initialVoiceState()

@@ -53,6 +53,17 @@ test("session start uses GPT-Live plus Responses delegation", () => {
   assert.ok(names.includes("prompt_session"))
 })
 
+test("live session start uses a custom spoken prompt when provided", () => {
+  const payload = sessionStartPayload({
+    model: "gpt-live-1",
+    voice: "cedar",
+    instructions: "Be a calm coach. One sentence at a time.",
+    backendModel: "gpt-5.6-luna",
+  })
+  assert.match(payload.session.instructions, /calm coach/)
+  assert.equal(payload.session.audio.output.voice, "cedar")
+})
+
 test("live audio uses session.input_audio.append", () => {
   const socket = new FakeSocket()
   const session = createLiveSession(socket, {})
@@ -138,15 +149,4 @@ test("live session.started opens; session.updated does not", () => {
   assert.equal(opens, 0)
   socket.emit({ type: "session.started" })
   assert.equal(opens, 1)
-})
-
-test("live mute uses session.input_audio.mute", () => {
-  const socket = new FakeSocket()
-  const session = createLiveSession(socket, {})
-  session.muteInput?.()
-  session.unmuteInput?.()
-  assert.deepEqual(
-    socket.sent.map((row) => (row as { type: string }).type),
-    ["session.input_audio.mute", "session.input_audio.unmute"],
-  )
 })

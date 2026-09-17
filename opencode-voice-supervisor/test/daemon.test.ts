@@ -12,6 +12,8 @@ import { chipLabel, initialVoiceState, type VoiceUiState } from "../src/types.ts
 function fakeSupervisor(): VoiceSupervisor {
   let state: VoiceUiState = initialVoiceState()
   let model = "gpt-realtime"
+  let voice = "marin"
+  let instructions: string | undefined
   const listeners = new Set<() => void>()
   const notify = () => {
     for (const listener of listeners) listener()
@@ -27,6 +29,8 @@ function fakeSupervisor(): VoiceSupervisor {
   return {
     state: () => state,
     model: () => model,
+    voice: () => voice,
+    instructions: () => instructions,
     chip: () => chipLabel(state),
     subscribe(listener) {
       listeners.add(listener)
@@ -38,18 +42,19 @@ function fakeSupervisor(): VoiceSupervisor {
       if (state.phase === "off" || state.phase === "error") await start()
       else await stop()
     },
-    async mute() {
-      state = { ...state, muted: true, phase: state.realtimeConnected ? "muted" : state.phase }
-      notify()
-    },
-    async unmute() {
-      state = { ...state, muted: false, phase: state.realtimeConnected ? "connected" : state.phase }
-      notify()
-    },
     async setModel(next) {
       model = next.trim()
       notify()
     },
+    async setVoice(next) {
+      voice = next.trim()
+      notify()
+    },
+    async setInstructions(next) {
+      instructions = next?.trim() || undefined
+      notify()
+    },
+    async previewVoice() {},
     statusText: () => `phase: ${state.phase}`,
     handleIdle() {},
     handleError() {},
@@ -96,6 +101,13 @@ test("TUI disconnect leaves the background voice daemon running", async () => {
     await bridge.start()
     assert.equal(bridge.state().phase, "connected")
     assert.equal(inner.state().phase, "connected")
+
+    await bridge.setVoice("cedar")
+    assert.equal(bridge.voice(), "cedar")
+    assert.equal(inner.voice(), "cedar")
+    await bridge.setInstructions("Talk like a calm coach.")
+    assert.match(bridge.instructions() ?? "", /calm coach/)
+    assert.match(inner.instructions() ?? "", /calm coach/)
 
     await focusFromDaemon?.("ses_worker", "/tmp/mario-game")
     await new Promise((resolve) => setTimeout(resolve, 30))

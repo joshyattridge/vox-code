@@ -10,9 +10,11 @@ import {
   CUSTOM_REALTIME_MODEL,
   LIVE_MODELS,
   REALTIME_MODELS,
+  REALTIME_VOICES,
   chipLabel,
   resolveOptions,
 } from "./types.ts"
+import { defaultSpokenInstructions } from "./instructions.ts"
 import type { VoiceSupervisor } from "./supervisor.ts"
 
 const ID = "voice.supervisor"
@@ -24,19 +26,6 @@ const currentSessionId = (api: TuiPluginApi) => {
     return typeof id === "string" ? id : undefined
   }
   return undefined
-}
-
-const Panel = (props: { supervisor: VoiceSupervisor }) => {
-  const [text, setText] = createSignal(props.supervisor.statusText())
-  const unsub = props.supervisor.subscribe(() => setText(props.supervisor.statusText()))
-  onCleanup(unsub)
-  return (
-    <box paddingLeft={1} paddingRight={1} paddingTop={1} paddingBottom={1} gap={1} flexDirection="column">
-      <text>Voice supervisor</text>
-      <text>{text()}</text>
-      <text>/voice toggle · /voice-model · /voice-mute · /voice-panel</text>
-    </box>
-  )
 }
 
 const Chip = (props: { supervisor: VoiceSupervisor; onToggle: () => void }) => {
@@ -54,13 +43,22 @@ const Chip = (props: { supervisor: VoiceSupervisor; onToggle: () => void }) => {
 }
 
 const KV_MODEL = "voice.supervisor.model"
+const KV_VOICE = "voice.supervisor.voice"
+const KV_INSTRUCTIONS = "voice.supervisor.instructions"
 
 const tui: TuiPlugin = async (api, options, meta) => {
   if (options?.enabled === false) return
   const savedModel = api.kv.get<string | undefined>(KV_MODEL, undefined)
+  const savedVoice = api.kv.get<string | undefined>(KV_VOICE, undefined)
+  const savedInstructions = api.kv.get<string | undefined>(KV_INSTRUCTIONS, undefined)
   const resolved = resolveOptions({
     ...(options ?? {}),
     model: typeof savedModel === "string" && savedModel.trim() ? savedModel : options?.model,
+    voice: typeof savedVoice === "string" && savedVoice.trim() ? savedVoice : options?.voice,
+    instructions:
+      typeof savedInstructions === "string"
+        ? savedInstructions.trim() || options?.instructions
+        : options?.instructions,
   })
   let supervisor: VoiceSupervisor
   try {
@@ -73,6 +71,8 @@ const tui: TuiPlugin = async (api, options, meta) => {
       hooks: {
         toast: (input) => api.ui.toast(input),
         onModelChange: (model) => api.kv.set(KV_MODEL, model),
+        onVoiceChange: (voice) => api.kv.set(KV_VOICE, voice),
+        onInstructionsChange: (instructions) => api.kv.set(KV_INSTRUCTIONS, instructions ?? ""),
         focusSession: async (sessionId, directory) =>
           focusTuiSession(api as unknown as TuiFocusApi, sessionId, directory, api.state.path.directory),
       },
@@ -84,8 +84,13 @@ const tui: TuiPlugin = async (api, options, meta) => {
     return
   }
 
+  let toggling = false
   const toggle = () => {
-    void supervisor.toggle()
+    if (toggling) return
+    toggling = true
+    void supervisor.toggle().finally(() => {
+      toggling = false
+    })
   }
 
   const pickModel = () => {
@@ -139,6 +144,76 @@ const tui: TuiPlugin = async (api, options, meta) => {
     ))
   }
 
+  const pickVoice = () => {
+    const DialogSelect = api.ui.DialogSelect
+    api.ui.dialog.replace(() => (
+      <DialogSelect
+        title="Voice speaker"
+        current={supervisor.voice()}
+        options={REALTIME_VOICES.map((voice) => ({
+          title: voice.title,
+          value: voice.id,
+          description: `${voice.description} · “${voice.sample}”`,
+          category: voice.category,
+        }))}
+        onSelect={(option) => {
+          const value = String(option.value)
+          api.ui.dialog.clear()
+          void (async () => {
+            await supervisor.previewVoice(value)
+            await supervisor.setVoice(value)
+          })()
+        }}
+      />
+    ))
+  }
+
+  const pickPrompt = () => {
+    const DialogSelect = api.ui.DialogSelect
+    const DialogPrompt = api.ui.DialogPrompt
+    const custom = Boolean(supervisor.instructions()?.trim())
+    api.ui.dialog.replace(() => (
+      <DialogSelect
+        title="Voice prompt"
+        current={custom ? "custom" : "default"}
+        options={[
+          {
+            title: "Edit speaking prompt…",
+            value: "edit",
+            description: custom ? "A custom prompt is active" : "Using the default spoken prompt",
+            category: "Prompt",
+          },
+          {
+            title: "Reset to default",
+            value: "reset",
+            description: "OpenCode voice assistant. Talk out loud.",
+            category: "Prompt",
+          },
+        ]}
+        onSelect={(option) => {
+          const value = String(option.value)
+          if (value === "reset") {
+            void supervisor.setInstructions(undefined)
+            api.ui.dialog.clear()
+            return
+          }
+          api.ui.dialog.replace(() => (
+            <DialogPrompt
+              title="How the voice should talk"
+              placeholder="How the voice should talk"
+              value={supervisor.instructions() ?? defaultSpokenInstructions(supervisor.model())}
+              onConfirm={(text) => {
+                void supervisor.setInstructions(text)
+                api.ui.dialog.clear()
+              }}
+              onCancel={() => api.ui.dialog.clear()}
+            />
+          ))
+        }}
+      />
+    ))
+  }
+
   api.lifecycle.onDispose(() => {
     voiceLog("tui disconnect keep-alive")
     void supervisor.dispose()
@@ -161,13 +236,6 @@ const tui: TuiPlugin = async (api, options, meta) => {
   api.event.on("permission.updated", (event) => {
     supervisor.handlePermission(event.properties.sessionID, event.properties.id, event.properties.title)
   })
-
-  api.route.register([
-    {
-      name: "voice.supervisor",
-      render: () => <Panel supervisor={supervisor} />,
-    },
-  ])
 
   // Slash commands, palette rows, and Ctrl+Shift+V come from the keymap.
   // OpenCode's TUI does not load plugins from opencode.json — they must be
@@ -193,6 +261,22 @@ const tui: TuiPlugin = async (api, options, meta) => {
         run: pickModel,
       },
       {
+        name: "voice.voice",
+        title: "Voice: speaker",
+        category: "Voice",
+        namespace: "palette",
+        slashName: "voice-voice",
+        run: pickVoice,
+      },
+      {
+        name: "voice.prompt",
+        title: "Voice: prompt",
+        category: "Voice",
+        namespace: "palette",
+        slashName: "voice-prompt",
+        run: pickPrompt,
+      },
+      {
         name: "voice.on",
         title: "Voice: on",
         category: "Voice",
@@ -213,26 +297,6 @@ const tui: TuiPlugin = async (api, options, meta) => {
         },
       },
       {
-        name: "voice.mute",
-        title: "Voice: mute",
-        category: "Voice",
-        namespace: "palette",
-        slashName: "voice-mute",
-        run: () => {
-          void supervisor.mute()
-        },
-      },
-      {
-        name: "voice.unmute",
-        title: "Voice: unmute",
-        category: "Voice",
-        namespace: "palette",
-        slashName: "voice-unmute",
-        run: () => {
-          void supervisor.unmute()
-        },
-      },
-      {
         name: "voice.status",
         title: "Voice: status",
         category: "Voice",
@@ -245,16 +309,6 @@ const tui: TuiPlugin = async (api, options, meta) => {
             variant: "info",
             duration: 5000,
           })
-        },
-      },
-      {
-        name: "voice.panel",
-        title: "Voice: panel",
-        category: "Voice",
-        namespace: "palette",
-        slashName: "voice-panel",
-        run: () => {
-          api.route.navigate("voice.supervisor")
         },
       },
     ],
@@ -282,6 +336,22 @@ const tui: TuiPlugin = async (api, options, meta) => {
       onSelect: pickModel,
     },
     {
+      title: "Voice: speaker",
+      value: "plugin.voice.voice",
+      category: "Voice",
+      suggested: true,
+      slash: { name: "voice-voice" },
+      onSelect: pickVoice,
+    },
+    {
+      title: "Voice: prompt",
+      value: "plugin.voice.prompt",
+      category: "Voice",
+      suggested: true,
+      slash: { name: "voice-prompt" },
+      onSelect: pickPrompt,
+    },
+    {
       title: "Voice: on",
       value: "plugin.voice.on",
       category: "Voice",
@@ -300,24 +370,6 @@ const tui: TuiPlugin = async (api, options, meta) => {
       },
     },
     {
-      title: "Voice: mute",
-      value: "plugin.voice.mute",
-      category: "Voice",
-      slash: { name: "voice-mute" },
-      onSelect: () => {
-        void supervisor.mute()
-      },
-    },
-    {
-      title: "Voice: unmute",
-      value: "plugin.voice.unmute",
-      category: "Voice",
-      slash: { name: "voice-unmute" },
-      onSelect: () => {
-        void supervisor.unmute()
-      },
-    },
-    {
       title: "Voice: status",
       value: "plugin.voice.status",
       category: "Voice",
@@ -329,15 +381,6 @@ const tui: TuiPlugin = async (api, options, meta) => {
           variant: "info",
           duration: 5000,
         })
-      },
-    },
-    {
-      title: "Voice: panel",
-      value: "plugin.voice.panel",
-      category: "Voice",
-      slash: { name: "voice-panel" },
-      onSelect: () => {
-        api.route.navigate("voice.supervisor")
       },
     },
   ])
@@ -355,7 +398,7 @@ const tui: TuiPlugin = async (api, options, meta) => {
 
   api.ui.toast({
     title: "Voice",
-    message: "Click ○ voice, or ctrl+p then Voice. /voice-model picks gpt-live-1 or a Realtime model.",
+    message: "Click ○ voice, or ctrl+p then Voice. /voice-voice plays a speaker sample. /voice-prompt edits how it talks.",
     variant: meta.state === "first" ? "success" : "info",
     duration: 6000,
   })

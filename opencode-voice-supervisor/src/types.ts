@@ -4,7 +4,6 @@ export type VoicePhase =
   | "connected"
   | "listening"
   | "speaking"
-  | "muted"
   | "error"
 
 export type VoiceUiState = {
@@ -13,7 +12,6 @@ export type VoiceUiState = {
   lastUserTranscript?: string
   lastAssistantTranscript?: string
   realtimeConnected: boolean
-  muted: boolean
   ownedSessionIds: string[]
 }
 
@@ -40,6 +38,89 @@ export const LIVE_MODELS = [
     description: "New GPT-Live · full duplex · $0.05/min",
   },
 ] as const
+
+export const REALTIME_VOICES = [
+  {
+    id: "marin",
+    title: "Marin",
+    description: "Recommended · clear, natural, slightly bright",
+    sample: "Hi, I'm Marin. I'll keep your coding sessions moving and skip the fluff.",
+    category: "Recommended",
+  },
+  {
+    id: "cedar",
+    title: "Cedar",
+    description: "Recommended · warm, grounded, slightly lower",
+    sample: "Hey, this is Cedar. I'll stay calm and tell you when the workers finish.",
+    category: "Recommended",
+  },
+  {
+    id: "alloy",
+    title: "Alloy",
+    description: "Neutral and balanced",
+    sample: "This is Alloy. Neutral tone, ready to dispatch coding work.",
+    category: "More voices",
+  },
+  {
+    id: "ash",
+    title: "Ash",
+    description: "Soft, slightly airy",
+    sample: "Hi, I'm Ash. Soft-spoken, and I'll keep updates short.",
+    category: "More voices",
+  },
+  {
+    id: "ballad",
+    title: "Ballad",
+    description: "Warm, narrative, a bit slower",
+    sample: "I'm Ballad. I'll narrate progress without reading your source code.",
+    category: "More voices",
+  },
+  {
+    id: "coral",
+    title: "Coral",
+    description: "Clear and upbeat",
+    sample: "Coral here. I'll keep things upbeat and tell you when a worker is done.",
+    category: "More voices",
+  },
+  {
+    id: "echo",
+    title: "Echo",
+    description: "Smooth, even, slightly masculine",
+    sample: "This is Echo. Smooth delivery, brief status, then back to work.",
+    category: "More voices",
+  },
+  {
+    id: "sage",
+    title: "Sage",
+    description: "Calm and measured",
+    sample: "Sage speaking. Calm updates only: what changed, what's blocked.",
+    category: "More voices",
+  },
+  {
+    id: "shimmer",
+    title: "Shimmer",
+    description: "Bright and expressive",
+    sample: "I'm Shimmer. I'll keep energy up and still stay to one or two sentences.",
+    category: "More voices",
+  },
+  {
+    id: "verse",
+    title: "Verse",
+    description: "Dynamic and expressive",
+    sample: "Verse here. Expressive, but I'll still keep the spoken replies short.",
+    category: "More voices",
+  },
+] as const
+
+export type RealtimeVoiceId = (typeof REALTIME_VOICES)[number]["id"]
+
+export function voiceMeta(id: string) {
+  return REALTIME_VOICES.find((voice) => voice.id === id)
+}
+
+export function isRealtimeVoice(id: string): id is RealtimeVoiceId {
+  return REALTIME_VOICES.some((voice) => voice.id === id)
+}
 
 export const REALTIME_MODELS = [
   {
@@ -95,12 +176,24 @@ export function resolveOptions(
   return { model, voice, keybind, backendModel, apiKey, instructions }
 }
 
+export function normalizeVoiceState(state: VoiceUiState): VoiceUiState {
+  if (state.phase === "error") {
+    return { ...state, realtimeConnected: false }
+  }
+  if (state.phase === "connecting") {
+    return { ...state, realtimeConnected: false }
+  }
+  if (!state.realtimeConnected) {
+    return { ...state, phase: "off" }
+  }
+  return state
+}
+
 export function chipLabel(state: VoiceUiState): string {
-  switch (state.phase) {
+  const normalized = normalizeVoiceState(state)
+  switch (normalized.phase) {
     case "off":
       return "○ voice"
-    case "muted":
-      return "● muted"
     case "error":
       return "● error"
     default:
@@ -112,7 +205,6 @@ export function initialVoiceState(): VoiceUiState {
   return {
     phase: "off",
     realtimeConnected: false,
-    muted: false,
     ownedSessionIds: [],
   }
 }

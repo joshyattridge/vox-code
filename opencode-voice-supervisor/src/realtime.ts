@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer"
 import WebSocket from "ws"
-import { SUPERVISOR_INSTRUCTIONS } from "./instructions.ts"
+import { resolveSpokenInstructions } from "./instructions.ts"
 import { executeTool, parseToolArgs, REALTIME_TOOLS, resolveToolContext, type FocusHandler, type ToolContextInput } from "./tools.ts"
 import type { SessionController } from "./sessions.ts"
 import { DEFAULT_MODEL, DEFAULT_VOICE, SAMPLE_RATE, type VoiceOptions } from "./types.ts"
@@ -25,8 +25,6 @@ export type RealtimeHandlers = {
 export type RealtimeSession = {
   sendAudio: (pcm: Buffer) => void
   injectText: (text: string, speak?: boolean) => void
-  muteInput?: () => void
-  unmuteInput?: () => void
   close: () => void
 }
 
@@ -84,7 +82,7 @@ export function sessionUpdatePayload(options: Pick<VoiceOptions, "model" | "voic
     session: {
       type: "realtime",
       model: options.model ?? DEFAULT_MODEL,
-      instructions: options.instructions ?? SUPERVISOR_INSTRUCTIONS,
+      instructions: resolveSpokenInstructions(options.model, options.instructions),
       output_modalities: ["audio"],
       audio: {
         input: {

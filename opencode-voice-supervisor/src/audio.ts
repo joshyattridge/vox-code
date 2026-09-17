@@ -194,9 +194,7 @@ class StdinPcmPlayer {
     })
     this.#player.stdin.on("error", (error) => {
       voiceLog("player stdin error", error.message)
-      this.#player = undefined
       this.#ready = false
-      if (this.#running) this.#spawn()
     })
     this.#player.stderr?.on("data", (chunk: string) => {
       const text = chunk.trim()
@@ -392,6 +390,52 @@ export function describeAudioDeps(): string[] {
     if (which(bin)) found.push(bin)
   }
   return found
+}
+
+export function pcmDurationMs(pcm: Buffer, rate = SAMPLE_RATE) {
+  return Math.ceil((pcm.length / 2 / rate) * 1000)
+}
+
+export async function playPcmClip(pcm: Buffer): Promise<void> {
+  if (!pcm.length) return
+  const play = which("play")
+  const ffplay = which("ffplay")
+  const aplay = which("aplay")
+  const spec = play
+    ? { cmd: play, args: soxPlayArgs() }
+    : ffplay
+      ? { cmd: ffplay, args: ffplayArgs() }
+      : aplay
+        ? { cmd: aplay, args: aplayArgs }
+        : undefined
+  if (!spec) {
+    throw new AudioError("No speaker tool found. Install sox (play) or ffmpeg (ffplay) to hear voice samples.")
+  }
+  const child = spawnStdio(spec.cmd, spec.args)
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM")
+      reject(new AudioError("Voice sample playback timed out"))
+    }, pcmDurationMs(pcm) + 4000)
+    let settled = false
+    const done = (error?: Error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (error) reject(error)
+      else resolve()
+    }
+    child.once("error", (error) => done(error instanceof Error ? error : new Error(String(error))))
+    child.once("exit", () => done())
+    child.stdin.once("error", () => {
+      // sox/ffplay may close stdin after the clip; ignore EPIPE
+    })
+    try {
+      child.stdin.end(pcm)
+    } catch (error) {
+      done(error instanceof Error ? error : new Error(String(error)))
+    }
+  })
 }
 
 export function pcmRms(pcm: Buffer) {

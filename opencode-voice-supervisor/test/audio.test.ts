@@ -4,7 +4,7 @@ import { spawn } from "node:child_process"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
-import { describeAudioDeps, detectAudio, ffplayArgs, FRAME_BYTES, makeSinePcm, pcmRms, PcmWritePump, PREROLL_BYTES } from "../src/audio.ts"
+import { describeAudioDeps, detectAudio, ffplayArgs, FRAME_BYTES, makeSinePcm, pcmDurationMs, pcmRms, PcmWritePump, PREROLL_BYTES } from "../src/audio.ts"
 import { SAMPLE_RATE } from "../src/types.ts"
 
 test("finds Homebrew rec/play even when PATH does not include them", () => {
@@ -74,6 +74,7 @@ test("jittered 440Hz sine is reconstructed without inserted zeros", () => {
 test("pcmRms is zero for silence and high for a sine", () => {
   assert.equal(pcmRms(Buffer.alloc(960)), 0)
   assert.ok(pcmRms(makeSinePcm(440, 0.05)) > 1000)
+  assert.equal(pcmDurationMs(Buffer.alloc(SAMPLE_RATE * 2)), 1000)
 })
 
 test("default preroll streams the first chunk immediately", () => {
