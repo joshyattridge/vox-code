@@ -27,9 +27,11 @@ test("session update uses the GA realtime shape", () => {
   assert.equal(payload.session.audio.output.voice, "cedar")
   assert.equal(payload.session.audio.input.format.type, "audio/pcm")
   assert.equal(payload.session.audio.input.turn_detection.type, "semantic_vad")
+  assert.equal(payload.session.audio.input.turn_detection.interrupt_response, false)
   const names = payload.session.tools.map((tool) => tool.name)
   assert.ok(names.includes("create_session"))
   assert.ok(names.includes("prompt_session"))
+  assert.match(payload.session.instructions, /create_session/)
   assert.equal("voice" in payload.session, false)
   assert.equal("modalities" in payload.session, false)
 })
@@ -41,6 +43,7 @@ test("session update uses a custom spoken prompt when provided", () => {
     instructions: "Talk like a pirate. Still dispatch coding sessions.",
   })
   assert.match(payload.session.instructions, /pirate/)
+  assert.match(payload.session.instructions, /create_session/)
   assert.equal(payload.session.audio.output.voice, "coral")
 })
 
@@ -102,13 +105,41 @@ test("GA function calls also arrive on response.output_item.done", async () => {
   assert.deepEqual(calls, ["list_sessions"])
 })
 
-test("speech started does not send unsupported GA client events", () => {
+test("assistant audio clears the input buffer so leftover mic cannot barge in", () => {
+  const socket = new FakeSocket()
+  createRealtimeSession(socket, {})
+  socket.emit({
+    type: "response.output_audio.delta",
+    item_id: "item_abc",
+    delta: Buffer.alloc(4800).toString("base64"),
+  })
+  const clear = socket.sent.find((row) => (row as { type: string }).type === "input_audio_buffer.clear")
+  assert.equal((clear as { type: string }).type, "input_audio_buffer.clear")
+  socket.sent.length = 0
+  socket.emit({
+    type: "response.output_audio.delta",
+    item_id: "item_abc",
+    delta: Buffer.alloc(4800).toString("base64"),
+  })
+  assert.deepEqual(socket.sent, [])
+})
+
+test("speech started does not truncate playback", () => {
   const socket = new FakeSocket()
   let started = false
   createRealtimeSession(socket, { onSpeechStarted: () => { started = true } })
+  socket.emit({
+    type: "response.output_audio.delta",
+    item_id: "item_abc",
+    delta: Buffer.alloc(4800).toString("base64"),
+  })
+  socket.sent.length = 0
   socket.emit({ type: "input_audio_buffer.speech_started" })
   assert.equal(started, true)
-  assert.deepEqual(socket.sent, [])
+  assert.equal(
+    socket.sent.some((row) => (row as { type: string }).type === "conversation.item.truncate"),
+    false,
+  )
 })
 
 test("ignores benign cancellation errors", () => {
@@ -138,4 +169,16 @@ test("audio deltas decode from base64", () => {
   createRealtimeSession(socket, { onAudioDelta: (pcm) => chunks.push(pcm) })
   socket.emit({ type: "response.output_audio.delta", delta: Buffer.from("hi").toString("base64") })
   assert.equal(chunks[0]?.toString(), "hi")
+})
+
+test("input audio appends only complete PCM16 samples", () => {
+  const socket = new FakeSocket()
+  const session = createRealtimeSession(socket, {})
+  session.sendAudio(Buffer.from([1, 2, 3]))
+  assert.equal(socket.sent.length, 1)
+  const first = socket.sent[0] as { audio: string }
+  assert.equal(Buffer.from(first.audio, "base64").equals(Buffer.from([1, 2])), true)
+  session.sendAudio(Buffer.from([4, 5, 6]))
+  const second = socket.sent[1] as { audio: string }
+  assert.equal(Buffer.from(second.audio, "base64").equals(Buffer.from([3, 4, 5, 6])), true)
 })

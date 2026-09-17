@@ -146,6 +146,7 @@ export function createLiveSession(
       } catch {
         return
       }
+      try {
       switch (event.type) {
         case "session.started":
           handlers.onOpen?.()
@@ -212,6 +213,11 @@ export function createLiveSession(
             voiceLog("live event", event.type)
           }
           break
+      }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        voiceLog("live event failed", { type: event.type, message })
+        handlers.onError?.(message)
       }
     },
     close: () => {

@@ -98,7 +98,7 @@ Plugin options in `opencode.json`, or env vars:
 | `model` | `OPENAI_REALTIME_MODEL` | `gpt-realtime` (or pick `gpt-live-1` with `/voice-model`) |
 | `backendModel` | `OPENAI_LIVE_BACKEND_MODEL` | `gpt-5.6-luna` (used only with GPT-Live) |
 | `voice` | `OPENAI_REALTIME_VOICE` | `marin` (pick others with `/voice-voice`; a sample plays when you select one) |
-| `instructions` | | spoken system prompt; default is `You are a voice assistant in OpenCode. Talk to the user out loud.` Edit with `/voice-prompt` |
+| `instructions` | | spoken style added on top of the supervisor prompt. Edit with `/voice-prompt` |
 | `keybind` | | `ctrl+shift+v` |
 | `apiKey` | | optional override; otherwise OpenCode auth / `OPENAI_API_KEY` |
 
@@ -108,7 +108,7 @@ The OpenCode model picker (the one that switches Qwen / Claude / GPT) is for **c
 
 `/voice-voice` lists OpenAI Realtime speakers (`marin`, `cedar`, `alloy`, `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`). Each row includes a sample line. Selecting one plays that sample through your speakers, then keeps the voice. Marin and Cedar are the ones OpenAI recommends.
 
-`/voice-prompt` edits the **spoken** system prompt. The default is just: talk to the user out loud. Reset restores that. GPT-Live still uses a separate backend prompt for tool calls; that one is not user-editable.
+`/voice-prompt` edits the **spoken style**. GPT-Live uses that as the voice-layer prompt and a separate backend prompt for tool calls. Realtime is one model, so a custom style is prepended to the supervisor/tool instructions instead of replacing them. Reset restores the default.
 
 ## How it is wired
 
@@ -122,7 +122,7 @@ TUI chip / commands  (disconnects on session switch; does not stop voice)
 OpenCode worker sessions
 ```
 
-Switching OpenCode sessions or projects unloads the TUI plugin. That only disconnects the chip. `/voice-off` is what actually stops the voice model. With the plugin installed globally, the chip comes back in the new folder.
+Switching OpenCode sessions or projects unloads the TUI plugin. That only disconnects the chip for a moment; the daemon keeps voice up so it can reconnect. Quitting OpenCode entirely stops voice after a few seconds with no TUI. `/voice-off` stops it immediately.
 
 Tools the voice model can call: `list_sessions`, `create_session`, `prompt_session` (non-blocking), `abort_session`, `session_status`, `reply_permission`, `focus_session`.
 

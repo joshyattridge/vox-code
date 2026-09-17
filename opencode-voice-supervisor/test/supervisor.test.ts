@@ -73,13 +73,13 @@ test("toggle starts when a key and fake realtime session exist", async () => {
   assert.equal(supervisor.chip(), "○ voice")
 })
 
-test("keeps sending microphone audio while the assistant is speaking", async () => {
+test("holds the microphone while a realtime model is speaking", async () => {
   const audio = new MemoryAudio()
   const sent: number[] = []
   let onAudioDelta: ((pcm: Buffer) => void) | undefined
   const supervisor = createVoiceSupervisor({
     client,
-    options: { apiKey: "sk-test" },
+    options: { apiKey: "sk-test", model: "gpt-realtime" },
     audio,
     connect: async (options) => {
       onAudioDelta = options.handlers.onAudioDelta
@@ -97,7 +97,38 @@ test("keeps sending microphone audio while the assistant is speaking", async () 
   assert.equal(sent.length, 1)
   onAudioDelta?.(Buffer.from([3, 4]))
   audio.push(Buffer.from([5, 6, 7, 8]))
-  assert.equal(sent.length, 2)
+  assert.equal(sent.length, 1)
+  await supervisor.stop()
+})
+
+test("realtime speech during playback does not unmute the mic", async () => {
+  const audio = new MemoryAudio()
+  const sent: number[] = []
+  let onAudioDelta: ((pcm: Buffer) => void) | undefined
+  let onSpeechStarted: (() => void) | undefined
+  const supervisor = createVoiceSupervisor({
+    client,
+    options: { apiKey: "sk-test", model: "gpt-realtime" },
+    audio,
+    connect: async (options) => {
+      onAudioDelta = options.handlers.onAudioDelta
+      onSpeechStarted = options.handlers.onSpeechStarted
+      return {
+        sendAudio(pcm) {
+          sent.push(pcm.length)
+        },
+        injectText() {},
+        close() {},
+      }
+    },
+  })
+  await supervisor.start()
+  onAudioDelta?.(Buffer.from([3, 4]))
+  audio.push(Buffer.from([5, 6]))
+  assert.equal(sent.length, 0)
+  onSpeechStarted?.()
+  audio.push(Buffer.from([7, 8, 9, 10]))
+  assert.equal(sent.length, 0)
   await supervisor.stop()
 })
 

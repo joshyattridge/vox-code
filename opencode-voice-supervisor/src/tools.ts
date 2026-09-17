@@ -202,13 +202,41 @@ async function runTool(
   }
 }
 
+function parseJsonObject(raw: string): Record<string, unknown> | undefined {
+  const parsed = JSON.parse(raw) as unknown
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return
+  return parsed as Record<string, unknown>
+}
+
+/** Realtime sometimes emits truncated tool JSON. Close an open string/object so the call can still run. */
+function repairJsonObject(raw: string): Record<string, unknown> | undefined {
+  let repaired = raw.trim()
+  if (!repaired.startsWith("{")) return
+  if ((repaired.match(/"/g) ?? []).length % 2 === 1) repaired += '"'
+  for (let extra = 0; extra <= 4; extra += 1) {
+    try {
+      const parsed = parseJsonObject(repaired + "}".repeat(extra))
+      if (parsed) return parsed
+    } catch {
+      // try one more closing brace
+    }
+  }
+}
+
 export function parseToolArgs(raw: string | Record<string, unknown> | undefined): Record<string, unknown> {
   if (!raw) return {}
-  if (typeof raw === "string") {
-    if (!raw.trim()) return {}
-    const parsed = JSON.parse(raw) as unknown
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {}
-    return parsed as Record<string, unknown>
+  if (typeof raw !== "string") return raw
+  const text = raw.trim()
+  if (!text) return {}
+  try {
+    return parseJsonObject(text) ?? {}
+  } catch {
+    const repaired = repairJsonObject(text)
+    if (repaired) {
+      voiceLog("tool args repaired", text.slice(0, 240))
+      return repaired
+    }
+    voiceLog("tool args json", text.slice(0, 240))
+    return {}
   }
-  return raw
 }

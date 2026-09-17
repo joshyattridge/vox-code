@@ -15,11 +15,20 @@ test("realtime voice catalog includes marin, cedar, and sample lines", () => {
 })
 
 test("custom spoken instructions replace the default prompt", () => {
-  assert.equal(resolveSpokenInstructions("gpt-realtime"), SUPERVISOR_INSTRUCTIONS)
+  assert.equal(resolveSpokenInstructions("gpt-live-1"), SUPERVISOR_INSTRUCTIONS)
   assert.equal(defaultSpokenInstructions("gpt-live-1"), SUPERVISOR_INSTRUCTIONS)
   assert.match(SUPERVISOR_INSTRUCTIONS, /Talk to the user out loud/)
-  assert.equal(
+  assert.match(resolveSpokenInstructions("gpt-realtime"), /create_session/)
+  assert.match(
     resolveSpokenInstructions("gpt-realtime", "  Talk like a pirate.  "),
+    /pirate/,
+  )
+  assert.match(
+    resolveSpokenInstructions("gpt-realtime", "Talk like a pirate."),
+    /create_session/,
+  )
+  assert.equal(
+    resolveSpokenInstructions("gpt-live-1", "  Talk like a pirate.  "),
     "Talk like a pirate.",
   )
 })

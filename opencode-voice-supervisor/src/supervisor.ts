@@ -5,12 +5,13 @@ import { voiceLog } from "./log.ts"
 import { createSessionController, type SessionController } from "./sessions.ts"
 import { openLive } from "./live.ts"
 import { fetchVoiceSamplePcm } from "./preview.ts"
-import { defaultSpokenInstructions, resolveSpokenInstructions } from "./instructions.ts"
+import { defaultSpokenInstructions } from "./instructions.ts"
 import { openRealtime, type RealtimeSession } from "./realtime.ts"
 import {
   CUSTOM_REALTIME_MODEL,
   chipLabel,
   initialVoiceState,
+  SAMPLE_RATE,
   isLiveModel,
   normalizeVoiceState,
   resolveOptions,
@@ -53,7 +54,11 @@ export type VoiceSupervisor = {
   dispose: () => Promise<void>
 }
 
-const ECHO_HOLD_MS = 50
+const ECHO_HOLD_MS = 300
+
+function playbackMs(bytes: number) {
+  return Math.ceil((bytes / 2 / SAMPLE_RATE) * 1000)
+}
 
 function isBenignVoiceError(message: string) {
   const text = message.toLowerCase()
@@ -88,6 +93,8 @@ export function createVoiceSupervisor(input: {
   let keySource = "missing"
   let speaking = false
   let playGeneration = 0
+  let spokenBytes = 0
+  let speakStartedAt = 0
   let stopping = false
   let idlePoll: ReturnType<typeof setInterval> | undefined
   const lastIdleAt = new Map<string, number>()
@@ -154,6 +161,9 @@ export function createVoiceSupervisor(input: {
   }
 
   const sendMic = (chunk: Buffer) => {
+    // Realtime VAD has no echo cancellation on sox. Hold the mic while the
+    // assistant is playing so speaker bleed does not barge in on itself.
+    if (speaking && !isLiveModel(options.model)) return
     realtime?.sendAudio(chunk)
   }
 
@@ -187,7 +197,7 @@ export function createVoiceSupervisor(input: {
         apiKey: resolvedKey.key,
         model: options.model,
         voice: options.voice,
-        instructions: resolveSpokenInstructions(options.model, options.instructions),
+        instructions: options.instructions,
         backendModel: options.backendModel,
         sessions,
         toolCtx,
@@ -212,7 +222,9 @@ export function createVoiceSupervisor(input: {
             toast(message, "error")
           },
           onSpeechStarted: () => {
-            if (!sessionActive() || state.phase === "speaking") return
+            if (!sessionActive()) return
+            voiceLog("heard speech", { speaking, phase: state.phase, model: options.model })
+            if (speaking && !isLiveModel(options.model)) return
             setState({ phase: "listening" })
           },
           onSpeechStopped: () => {
@@ -221,17 +233,26 @@ export function createVoiceSupervisor(input: {
           },
           onAudioDelta: (pcm) => {
             if (!sessionActive()) return
-            if (!speaking) playGeneration += 1
+            if (!speaking) {
+              playGeneration += 1
+              spokenBytes = 0
+              speakStartedAt = Date.now()
+            }
             speaking = true
+            spokenBytes += pcm.length
             if (state.phase !== "speaking") setState({ phase: "speaking", realtimeConnected: true })
             void audio?.play(pcm)
           },
           onAudioDone: async () => {
             const generation = playGeneration
+            const remaining = Math.max(0, playbackMs(spokenBytes) - (Date.now() - speakStartedAt))
+            if (remaining) await new Promise((resolve) => setTimeout(resolve, remaining))
             await audio?.drainPlayback()
             await new Promise((resolve) => setTimeout(resolve, ECHO_HOLD_MS))
             if (generation !== playGeneration || !sessionActive()) return
             speaking = false
+            spokenBytes = 0
+            speakStartedAt = 0
             if (state.realtimeConnected) setState({ phase: "connected" })
           },
           onTranscript: (role, text) => {
@@ -262,6 +283,8 @@ export function createVoiceSupervisor(input: {
     stopping = true
     starting = false
     speaking = false
+    spokenBytes = 0
+    speakStartedAt = 0
     playGeneration += 1
     stopIdlePoll()
     lastBusy.clear()

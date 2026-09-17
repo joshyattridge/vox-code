@@ -170,12 +170,10 @@ export async function listenVoiceDaemon(input?: {
   const scheduleIdleExit = () => {
     if (idleExit) clearTimeout(idleExit)
     idleExit = undefined
-    const live = supervisor?.state().realtimeConnected || supervisor?.state().phase === "connecting"
-    if (live || sockets.size > 0 || closed) return
+    if (sockets.size > 0 || closed) return
     idleExit = setTimeout(() => {
       if (sockets.size > 0 || closed) return
-      const stillLive = supervisor?.state().realtimeConnected || supervisor?.state().phase === "connecting"
-      if (stillLive) return
+      voiceLog("idle exit no tui", { phase: supervisor?.state().phase })
       void close()
     }, idleExitMs)
   }
@@ -397,6 +395,13 @@ export async function listenVoiceDaemon(input?: {
     }
     process.once("SIGINT", onSignal)
     process.once("SIGTERM", onSignal)
+    process.on("uncaughtException", (error) => {
+      voiceLog("uncaughtException", error.stack ?? error.message)
+    })
+    process.on("unhandledRejection", (reason) => {
+      const message = reason instanceof Error ? reason.stack ?? reason.message : String(reason)
+      voiceLog("unhandledRejection", message)
+    })
   }
 
   return { sockPath, close }

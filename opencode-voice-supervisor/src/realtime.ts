@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer"
 import WebSocket from "ws"
 import { resolveSpokenInstructions } from "./instructions.ts"
+import { voiceLog } from "./log.ts"
 import { executeTool, parseToolArgs, REALTIME_TOOLS, resolveToolContext, type FocusHandler, type ToolContextInput } from "./tools.ts"
 import type { SessionController } from "./sessions.ts"
 import { DEFAULT_MODEL, DEFAULT_VOICE, SAMPLE_RATE, type VoiceOptions } from "./types.ts"
@@ -90,7 +91,7 @@ export function sessionUpdatePayload(options: Pick<VoiceOptions, "model" | "voic
           transcription: { model: "gpt-4o-mini-transcribe" },
           turn_detection: {
             type: "semantic_vad",
-            interrupt_response: true,
+            interrupt_response: false,
             create_response: true,
           },
         },
@@ -103,6 +104,12 @@ export function sessionUpdatePayload(options: Pick<VoiceOptions, "model" | "voic
       tool_choice: "auto",
     },
   }
+}
+
+export function pcmEndMs(bytes: number, startedAt: number, now = Date.now()) {
+  const generatedMs = Math.ceil((bytes / 2 / SAMPLE_RATE) * 1000)
+  if (generatedMs <= 0) return 0
+  return Math.max(0, Math.min(now - startedAt, generatedMs))
 }
 
 export function createRealtimeSession(
@@ -118,6 +125,27 @@ export function createRealtimeSession(
   }
 
   const seenCalls = new Set<string>()
+  let pendingByte = Buffer.alloc(0)
+  let currentItemId: string | undefined
+  let generatedBytes = 0
+  let playbackStartedAt = 0
+  let clearedForItem: string | undefined
+
+  const noteAudioItem = (event: RealtimeEvent) => {
+    const item = event.item as { id?: string } | undefined
+    const itemId = typeof event.item_id === "string" ? event.item_id : item?.id
+    if (!itemId) return
+    if (itemId === currentItemId) return
+    currentItemId = itemId
+    generatedBytes = 0
+    playbackStartedAt = 0
+  }
+
+  const clearInputBuffer = () => {
+    if (!currentItemId || clearedForItem === currentItemId) return
+    clearedForItem = currentItemId
+    send({ type: "input_audio_buffer.clear" })
+  }
 
   const handleToolCall = async (name: string, callId: string, args: Record<string, unknown>) => {
     if (!name || !callId || seenCalls.has(callId)) return
@@ -153,6 +181,7 @@ export function createRealtimeSession(
       } catch {
         return
       }
+      try {
       switch (event.type) {
         case "session.created":
         case "session.updated":
@@ -166,15 +195,25 @@ export function createRealtimeSession(
           break
         }
         case "input_audio_buffer.speech_started":
+          voiceLog("speech started", { speaking: Boolean(generatedBytes), item: currentItemId })
           handlers.onSpeechStarted?.()
           break
         case "input_audio_buffer.speech_stopped":
           handlers.onSpeechStopped?.()
           break
+        case "response.output_item.added":
+          noteAudioItem(event)
+          break
         case "response.output_audio.delta":
         case "response.audio.delta": {
+          noteAudioItem(event)
           const delta = typeof event.delta === "string" ? event.delta : ""
-          if (delta) handlers.onAudioDelta?.(Buffer.from(delta, "base64"))
+          if (!delta) break
+          const pcm = Buffer.from(delta, "base64")
+          generatedBytes += pcm.length
+          if (!playbackStartedAt) playbackStartedAt = Date.now()
+          clearInputBuffer()
+          handlers.onAudioDelta?.(pcm)
           break
         }
         case "response.output_audio.done":
@@ -213,6 +252,11 @@ export function createRealtimeSession(
         default:
           break
       }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        voiceLog("realtime event failed", { type: event.type, message })
+        handlers.onError?.(message)
+      }
     },
     close: () => handlers.onClose?.("closed"),
     error: (message) => handlers.onError?.(message),
@@ -220,9 +264,13 @@ export function createRealtimeSession(
 
   return {
     sendAudio(pcm) {
+      const bytes = Buffer.concat([pendingByte, pcm])
+      const completeLength = bytes.length - (bytes.length % 2)
+      pendingByte = bytes.subarray(completeLength)
+      if (!completeLength) return
       send({
         type: "input_audio_buffer.append",
-        audio: pcm.toString("base64"),
+        audio: bytes.subarray(0, completeLength).toString("base64"),
       })
     },
     injectText(text, speak = true) {

@@ -172,38 +172,56 @@ class StdinPcmPlayer {
     this.#ready = false
     this.#corked = false
     this.#held = []
-    if (!this.#player) return
+    const player = this.#player
+    this.#player = undefined
+    if (!player) return
     try {
-      this.#player.stdin.end()
+      player.stdin.end()
     } catch {
       // already closed
     }
-    this.#player.kill("SIGTERM")
-    this.#player = undefined
+    player.kill("SIGTERM")
+    const killer = setTimeout(() => {
+      try {
+        player.kill("SIGKILL")
+      } catch {
+        // already gone
+      }
+    }, 250)
+    killer.unref?.()
   }
 
   #spawn() {
     if (this.#player && !this.#player.killed) return
     const bin = this.#command()
     this.#ready = false
-    this.#player = spawnStdio(bin, this.#args)
+    const child = spawnStdio(bin, this.#args)
+    this.#player = child
     voiceLog("player start", { bin, args: this.#args.join(" ") })
-    this.#player.once("spawn", () => {
+    child.once("spawn", () => {
+      if (this.#player !== child) return
       this.#ready = true
       this.#flushHeld()
     })
-    this.#player.stdin.on("error", (error) => {
+    child.stdin.on("error", (error) => {
       voiceLog("player stdin error", error.message)
-      this.#ready = false
+      if (this.#player === child) this.#ready = false
     })
-    this.#player.stderr?.on("data", (chunk: string) => {
+    child.stderr?.on("data", (chunk: string) => {
       const text = chunk.trim()
       if (text) voiceLog("player stderr", text.slice(0, 400))
     })
-    this.#player.on("exit", (code, signal) => {
-      this.#player = undefined
-      this.#ready = false
-      if (!this.#running) return
+    child.on("exit", (code, signal) => {
+      if (this.#player === child) {
+        this.#player = undefined
+        this.#ready = false
+      }
+      if (!this.#running || this.#player) return
+      if (code === 0 && !signal) {
+        this.#running = false
+        voiceLog("player ended", { name: bin, code })
+        return
+      }
       this.restarts += 1
       voiceLog("player restart", { name: bin, code, signal, restarts: this.restarts })
       this.#spawn()

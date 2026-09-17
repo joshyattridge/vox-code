@@ -274,4 +274,17 @@ test("lastAssistantText reads GPT-Live and OpenCode message shapes", () => {
 test("parseToolArgs reads JSON objects", () => {
   assert.deepEqual(parseToolArgs(`{"title":"auth"}`), { title: "auth" })
   assert.deepEqual(parseToolArgs(""), {})
+  assert.deepEqual(parseToolArgs("[]"), {})
+})
+
+test("parseToolArgs repairs truncated realtime tool JSON instead of throwing", () => {
+  const parsed = parseToolArgs(
+    `{"title":"New Project Setup","prompt":"Create a fresh project environment for the user to start coding. Ask minimal clarifying questions only if needed, otherwise set up a basic`,
+  )
+  assert.equal(parsed.title, "New Project Setup")
+  assert.match(String(parsed.prompt), /fresh project environment/)
+})
+
+test("parseToolArgs returns empty object for junk JSON", () => {
+  assert.deepEqual(parseToolArgs("{not json"), {})
 })
