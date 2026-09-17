@@ -12,6 +12,8 @@ function readPkg(dir: string) {
   return JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as {
     name: string
     bin?: Record<string, string>
+    dependencies?: Record<string, string>
+    peerDependencies?: Record<string, string>
     exports: Record<string, string | { import?: string; config?: { voice?: string; model?: string } }>
   }
 }
@@ -24,6 +26,8 @@ test("GitHub / npx package is named vox-code and exposes server + TUI entrypoint
   const pkg = readPkg(repo)
   assert.equal(pkg.name, "vox-code")
   assert.equal(pkg.bin?.["vox-code"], "./scripts/install.mjs")
+  assert.equal(pkg.dependencies?.["@opencode-ai/plugin"], undefined)
+  assert.ok(pkg.peerDependencies?.["@opencode-ai/plugin"])
   const server = exportImport(pkg.exports["./server"])
   const tui = exportImport(pkg.exports["./tui"])
   assert.ok(server?.endsWith("src/index.ts"), server)
