@@ -105,14 +105,14 @@ export async function focusTuiSession(
   })
   if (sessionRouteFocused(api.route.current, sessionId) || selected || navigated) {
     api.ui?.toast?.({
-      title: "Voice",
+      title: "Vox Code",
       message: "Opened the worker session.",
       variant: "success",
       duration: 2500,
     })
   } else {
     api.ui?.toast?.({
-      title: "Voice",
+      title: "Vox Code",
       message: "Could not switch the TUI to that session.",
       variant: "warning",
       duration: 4000,

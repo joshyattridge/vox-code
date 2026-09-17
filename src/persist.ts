@@ -9,15 +9,15 @@ export type PersistedVoiceState = VoiceUiState & {
 }
 
 export function stateFilePath(): string {
-  return join(homedir(), ".local/share/opencode/voice-supervisor/state.json")
+  return join(homedir(), ".local/share/opencode/vox-code/state.json")
 }
 
 export function daemonSockPath() {
-  return process.env.VOICE_SOCK ?? stateFilePath().replace(/state\.json$/, "voice.sock")
+  return process.env.VOX_SOCK ?? process.env.VOICE_SOCK ?? stateFilePath().replace(/state\.json$/, "vox.sock")
 }
 
 export function daemonPidPath() {
-  return stateFilePath().replace(/state\.json$/, "voice.pid")
+  return stateFilePath().replace(/state\.json$/, "vox.pid")
 }
 
 export function persistVoiceState(state: VoiceUiState): void {

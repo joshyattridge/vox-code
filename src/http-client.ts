@@ -12,7 +12,7 @@ function joinUrl(base: string, path: string, directory?: string) {
 export function createHttpSessionClient(config: ClientConfig, directory?: string): SessionClient {
   const baseUrl = config.baseUrl
   if (!baseUrl) {
-    const missing = async () => ({ error: { message: "Voice daemon has no OpenCode server URL" } })
+    const missing = async () => ({ error: { message: "Vox Code daemon has no OpenCode server URL" } })
     return {
       session: {
         list: missing,

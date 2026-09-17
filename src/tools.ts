@@ -30,7 +30,7 @@ export const REALTIME_TOOLS = [
     type: "function",
     name: "create_session",
     description:
-      "Create a worker OpenCode session, optionally prompt it, and focus it in the TUI so the user can watch. Omit directory to use the current project. For a new folder in the user's home, pass a path like /Users/<name>/pong — never /home, /root, /workspace, or /tmp unless they asked for that path. Missing folders are created. Voice keeps running if the TUI switches projects.",
+      "Create a worker OpenCode session, optionally prompt it, and focus it in the TUI so the user can watch. Omit directory to use the current project. For a new folder in the user's home, pass a path like /Users/<name>/pong — never /home, /root, /workspace, or /tmp unless they asked for that path. Missing folders are created. Vox Code keeps running if the TUI switches projects.",
     parameters: {
       type: "object",
       properties: {

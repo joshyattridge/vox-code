@@ -17,7 +17,7 @@ import {
 import { defaultSpokenInstructions } from "./instructions.ts"
 import type { VoiceSupervisor } from "./supervisor.ts"
 
-const ID = "voice.supervisor"
+const ID = "vox.code"
 
 const currentSessionId = (api: TuiPluginApi) => {
   const route = api.route.current
@@ -42,9 +42,9 @@ const Chip = (props: { supervisor: VoiceSupervisor; onToggle: () => void }) => {
   )
 }
 
-const KV_MODEL = "voice.supervisor.model"
-const KV_VOICE = "voice.supervisor.voice"
-const KV_INSTRUCTIONS = "voice.supervisor.instructions"
+const KV_MODEL = "vox.code.model"
+const KV_VOICE = "vox.code.voice"
+const KV_INSTRUCTIONS = "vox.code.instructions"
 
 const tui: TuiPlugin = async (api, options, meta) => {
   if (options?.enabled === false) return
@@ -80,7 +80,7 @@ const tui: TuiPlugin = async (api, options, meta) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     voiceLog("daemon attach failed", message)
-    api.ui.toast({ title: "Voice", message, variant: "error", duration: 8000 })
+    api.ui.toast({ title: "Vox Code", message, variant: "error", duration: 8000 })
     return
   }
 
@@ -98,7 +98,7 @@ const tui: TuiPlugin = async (api, options, meta) => {
     const DialogPrompt = api.ui.DialogPrompt
     api.ui.dialog.replace(() => (
       <DialogSelect
-        title="Voice model"
+        title="Vox Code model"
         current={supervisor.model()}
         options={[
           ...LIVE_MODELS.map((model) => ({
@@ -125,7 +125,7 @@ const tui: TuiPlugin = async (api, options, meta) => {
           if (value === CUSTOM_REALTIME_MODEL) {
             api.ui.dialog.replace(() => (
               <DialogPrompt
-                title="Custom voice model"
+                title="Custom Vox Code model"
                 placeholder="gpt-live-1"
                 value={supervisor.model()}
                 onConfirm={(id) => {
@@ -148,7 +148,7 @@ const tui: TuiPlugin = async (api, options, meta) => {
     const DialogSelect = api.ui.DialogSelect
     api.ui.dialog.replace(() => (
       <DialogSelect
-        title="Voice speaker"
+        title="Vox Code speaker"
         current={supervisor.voice()}
         options={REALTIME_VOICES.map((voice) => ({
           title: voice.title,
@@ -174,7 +174,7 @@ const tui: TuiPlugin = async (api, options, meta) => {
     const custom = Boolean(supervisor.instructions()?.trim())
     api.ui.dialog.replace(() => (
       <DialogSelect
-        title="Voice prompt"
+        title="Vox Code prompt"
         current={custom ? "custom" : "default"}
         options={[
           {
@@ -244,67 +244,74 @@ const tui: TuiPlugin = async (api, options, meta) => {
     mode: "base",
     commands: [
       {
-        name: "voice.toggle",
-        title: "Voice: toggle",
-        category: "Voice",
+        name: "vox.toggle",
+        title: "Vox: toggle",
+        category: "Vox",
         namespace: "palette",
-        slashName: "voice",
+        slashName: "vox",
+        slashAliases: ["voice"],
         suggested: true,
         run: toggle,
       },
       {
-        name: "voice.model",
-        title: "Voice: model",
-        category: "Voice",
+        name: "vox.model",
+        title: "Vox: model",
+        category: "Vox",
         namespace: "palette",
-        slashName: "voice-model",
+        slashName: "vox-model",
+        slashAliases: ["voice-model"],
         run: pickModel,
       },
       {
-        name: "voice.voice",
-        title: "Voice: speaker",
-        category: "Voice",
+        name: "vox.voice",
+        title: "Vox: speaker",
+        category: "Vox",
         namespace: "palette",
-        slashName: "voice-voice",
+        slashName: "vox-voice",
+        slashAliases: ["voice-voice"],
         run: pickVoice,
       },
       {
-        name: "voice.prompt",
-        title: "Voice: prompt",
-        category: "Voice",
+        name: "vox.prompt",
+        title: "Vox: prompt",
+        category: "Vox",
         namespace: "palette",
-        slashName: "voice-prompt",
+        slashName: "vox-prompt",
+        slashAliases: ["voice-prompt"],
         run: pickPrompt,
       },
       {
-        name: "voice.on",
-        title: "Voice: on",
-        category: "Voice",
+        name: "vox.on",
+        title: "Vox: on",
+        category: "Vox",
         namespace: "palette",
-        slashName: "voice-on",
+        slashName: "vox-on",
+        slashAliases: ["voice-on"],
         run: () => {
           void supervisor.start()
         },
       },
       {
-        name: "voice.off",
-        title: "Voice: off",
-        category: "Voice",
+        name: "vox.off",
+        title: "Vox: off",
+        category: "Vox",
         namespace: "palette",
-        slashName: "voice-off",
+        slashName: "vox-off",
+        slashAliases: ["voice-off"],
         run: () => {
           void supervisor.stop()
         },
       },
       {
-        name: "voice.status",
-        title: "Voice: status",
-        category: "Voice",
+        name: "vox.status",
+        title: "Vox: status",
+        category: "Vox",
         namespace: "palette",
-        slashName: "voice-status",
+        slashName: "vox-status",
+        slashAliases: ["voice-status"],
         run: () => {
           api.ui.toast({
-            title: "Voice",
+            title: "Vox Code",
             message: supervisor.statusText(),
             variant: "info",
             duration: 5000,
@@ -312,71 +319,71 @@ const tui: TuiPlugin = async (api, options, meta) => {
         },
       },
     ],
-    bindings: [{ key: resolved.keybind, cmd: "voice.toggle", desc: "Toggle voice" }],
+    bindings: [{ key: resolved.keybind, cmd: "vox.toggle", desc: "Toggle Vox Code" }],
   })
 
   // Prompt `/` autocomplete still uses the legacy command registry in 1.18.
   // Keymap slashName covers ctrl+p; this covers the same `/review`-style list.
   api.command?.register(() => [
     {
-      title: "Voice: toggle",
-      value: "plugin.voice.toggle",
-      category: "Voice",
+      title: "Vox: toggle",
+      value: "plugin.vox.toggle",
+      category: "Vox",
       keybind: resolved.keybind,
       suggested: true,
-      slash: { name: "voice" },
+      slash: { name: "vox" },
       onSelect: toggle,
     },
     {
-      title: "Voice: model",
-      value: "plugin.voice.model",
-      category: "Voice",
+      title: "Vox: model",
+      value: "plugin.vox.model",
+      category: "Vox",
       suggested: true,
-      slash: { name: "voice-model" },
+      slash: { name: "vox-model" },
       onSelect: pickModel,
     },
     {
-      title: "Voice: speaker",
-      value: "plugin.voice.voice",
-      category: "Voice",
+      title: "Vox: speaker",
+      value: "plugin.vox.voice",
+      category: "Vox",
       suggested: true,
-      slash: { name: "voice-voice" },
+      slash: { name: "vox-voice" },
       onSelect: pickVoice,
     },
     {
-      title: "Voice: prompt",
-      value: "plugin.voice.prompt",
-      category: "Voice",
+      title: "Vox: prompt",
+      value: "plugin.vox.prompt",
+      category: "Vox",
       suggested: true,
-      slash: { name: "voice-prompt" },
+      slash: { name: "vox-prompt" },
       onSelect: pickPrompt,
     },
     {
-      title: "Voice: on",
-      value: "plugin.voice.on",
-      category: "Voice",
-      slash: { name: "voice-on" },
+      title: "Vox: on",
+      value: "plugin.vox.on",
+      category: "Vox",
+      slash: { name: "vox-on" },
       onSelect: () => {
         void supervisor.start()
       },
     },
     {
-      title: "Voice: off",
-      value: "plugin.voice.off",
-      category: "Voice",
-      slash: { name: "voice-off" },
+      title: "Vox: off",
+      value: "plugin.vox.off",
+      category: "Vox",
+      slash: { name: "vox-off" },
       onSelect: () => {
         void supervisor.stop()
       },
     },
     {
-      title: "Voice: status",
-      value: "plugin.voice.status",
-      category: "Voice",
-      slash: { name: "voice-status" },
+      title: "Vox: status",
+      value: "plugin.vox.status",
+      category: "Vox",
+      slash: { name: "vox-status" },
       onSelect: () => {
         api.ui.toast({
-          title: "Voice",
+          title: "Vox Code",
           message: supervisor.statusText(),
           variant: "info",
           duration: 5000,
@@ -397,8 +404,8 @@ const tui: TuiPlugin = async (api, options, meta) => {
   })
 
   api.ui.toast({
-    title: "Voice",
-    message: "Click ○ voice, or ctrl+p then Voice. /voice-voice plays a speaker sample. /voice-prompt edits how it talks.",
+    title: "Vox Code",
+    message: "Click ○ vox, or ctrl+p then Vox. /vox-voice plays a speaker sample. /vox-prompt edits how it talks.",
     variant: meta.state === "first" ? "success" : "info",
     duration: 6000,
   })

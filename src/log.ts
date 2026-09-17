@@ -3,7 +3,7 @@ import { dirname } from "node:path"
 import { stateFilePath } from "./persist.ts"
 
 export function voiceLogPath() {
-  return stateFilePath().replace(/state\.json$/, "voice.log")
+  return stateFilePath().replace(/state\.json$/, "vox.log")
 }
 
 export function voiceLog(message: string, extra?: unknown) {

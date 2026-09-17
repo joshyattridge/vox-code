@@ -1,0 +1,84 @@
+{
+  "name": "vox-code",
+  "version": "0.1.0",
+  "description": "Vox Code — talk to OpenCode. It talks back and drives coding sessions from a background voice daemon.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "vox-code": "./scripts/install.mjs"
+  },
+  "engines": {
+    "opencode": ">=1.18.29",
+    "node": ">=20"
+  },
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./server": {
+      "import": "./src/index.ts",
+      "config": {
+        "voice": "marin",
+        "model": "gpt-realtime"
+      }
+    },
+    "./tui": {
+      "import": "./src/tui.tsx",
+      "config": {
+        "voice": "marin",
+        "model": "gpt-realtime"
+      }
+    }
+  },
+  "files": [
+    "src",
+    "scripts",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/joshyattridge/vox-code.git"
+  },
+  "homepage": "https://github.com/joshyattridge/vox-code",
+  "bugs": {
+    "url": "https://github.com/joshyattridge/vox-code/issues"
+  },
+  "keywords": [
+    "vox-code",
+    "opencode",
+    "plugin",
+    "voice",
+    "realtime",
+    "gpt-live",
+    "openai"
+  ],
+  "scripts": {
+    "install-plugin": "node ./scripts/install.mjs",
+    "test": "node --experimental-strip-types --test test/audio.test.ts test/auth.test.ts test/daemon.test.ts test/focus.test.ts test/install.test.ts test/live.test.ts test/paths.test.ts test/persist.test.ts test/protocol.test.ts test/realtime.test.ts test/status.test.ts test/supervisor.test.ts test/tools.test.ts test/tui-config.test.ts test/voices.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "1.18.31",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.8.2"
+  },
+  "peerDependencies": {
+    "@opentui/core": ">=0.4.5",
+    "@opentui/solid": ">=0.4.5",
+    "solid-js": ">=1.9.0"
+  },
+  "peerDependenciesMeta": {
+    "@opentui/core": {
+      "optional": true
+    },
+    "@opentui/solid": {
+      "optional": true
+    },
+    "solid-js": {
+      "optional": true
+    }
+  }
+}

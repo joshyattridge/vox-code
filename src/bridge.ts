@@ -63,7 +63,7 @@ export function resolveDaemonRuntime(input?: { execPath?: string; path?: string 
   if (node) return { cmd: node, kind: "node" as const }
   if (bun) return { cmd: bun, kind: "bun" as const }
   throw new Error(
-    "Voice daemon needs Node.js or Bun on PATH. OpenCode cannot run the daemon script itself.",
+    "Vox Code daemon needs Node.js or Bun on PATH. OpenCode cannot run the daemon script itself.",
   )
 }
 
@@ -115,6 +115,7 @@ function spawnDaemon(sockPath: string) {
     env: {
       ...process.env,
       VOICE_DAEMON: "1",
+      VOX_SOCK: sockPath,
       VOICE_SOCK: sockPath,
     },
   })
@@ -197,7 +198,7 @@ async function ensureSocket(sockPath: string, pidPath: string) {
       lastError = error
     }
   }
-  const detail = lastError instanceof Error ? lastError.message : "Voice daemon did not start"
+  const detail = lastError instanceof Error ? lastError.message : "Vox Code daemon did not start"
   throw new Error(`${detail}. Check ${voiceLogPath()}`)
 }
 
@@ -213,7 +214,7 @@ export async function attachVoiceDaemon(input: {
   connect?: (sockPath: string) => Promise<Socket>
   replaced?: boolean
 }): Promise<VoiceSupervisor> {
-  const sockPath = input.sockPath ?? process.env.VOICE_SOCK ?? daemonSockPath()
+  const sockPath = input.sockPath ?? process.env.VOX_SOCK ?? process.env.VOICE_SOCK ?? daemonSockPath()
   const pidPath = input.pidPath ?? daemonPidPath()
   const socket = input.connect ? await input.connect(sockPath) : await ensureSocket(sockPath, pidPath)
   socket.setEncoding("utf8")
@@ -279,7 +280,7 @@ export async function attachVoiceDaemon(input: {
         notify()
         return
       case "toast":
-        input.hooks?.toast?.({ title: "Voice", message: message.message, variant: message.variant })
+        input.hooks?.toast?.({ title: "Vox Code", message: message.message, variant: message.variant })
         return
       case "focus":
         void (async () => {

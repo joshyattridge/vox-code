@@ -64,7 +64,7 @@ export async function listenVoiceDaemon(input?: {
   idleExitMs?: number
   installSignals?: boolean
 }): Promise<VoiceDaemon> {
-  const sockPath = input?.sockPath ?? process.env.VOICE_SOCK ?? daemonSockPath()
+  const sockPath = input?.sockPath ?? process.env.VOX_SOCK ?? process.env.VOICE_SOCK ?? daemonSockPath()
   const pidPath = input?.pidPath ?? daemonPidPath()
   const idleExitMs = input?.idleExitMs ?? IDLE_EXIT_MS
   mkdirSync(dirname(sockPath), { recursive: true })
@@ -134,7 +134,7 @@ export async function listenVoiceDaemon(input?: {
     new Promise<{ data?: unknown; error?: unknown }>((resolve) => {
       const target = sockets.values().next().value as Socket | undefined
       if (!target || target.destroyed) {
-        resolve({ error: { message: "Voice daemon has no TUI client" } })
+        resolve({ error: { message: "Vox Code daemon has no TUI client" } })
         return
       }
       const id = randomUUID()
@@ -330,7 +330,7 @@ export async function listenVoiceDaemon(input?: {
     if (closed) return
     closed = true
     if (idleExit) clearTimeout(idleExit)
-    failPendingRpc("Voice daemon stopped")
+    failPendingRpc("Vox Code daemon stopped")
     unsub?.()
     await supervisor?.stop({ silent: true }).catch(() => undefined)
     for (const socket of sockets) socket.destroy()
@@ -372,7 +372,7 @@ export async function listenVoiceDaemon(input?: {
     if (code !== "EADDRINUSE") throw error
     const existing = readPid(pidPath)
     if (existing && pidAlive(existing)) {
-      throw new Error(`Voice daemon already running (pid ${existing})`)
+      throw new Error(`Vox Code daemon already running (pid ${existing})`)
     }
     try {
       unlinkSync(sockPath)

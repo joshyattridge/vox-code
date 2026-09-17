@@ -66,11 +66,11 @@ test("toggle starts when a key and fake realtime session exist", async () => {
   })
   await supervisor.start()
   assert.equal(supervisor.state().phase, "connected")
-  assert.equal(supervisor.chip(), "● VOICE")
+  assert.equal(supervisor.chip(), "● VOX")
   assert.equal(audio.capturing, true)
   await supervisor.stop()
   assert.equal(closed, true)
-  assert.equal(supervisor.chip(), "○ voice")
+  assert.equal(supervisor.chip(), "○ vox")
 })
 
 test("holds the microphone while a realtime model is speaking", async () => {
@@ -298,9 +298,9 @@ test("double toggle while connecting only starts once", async () => {
   await Promise.all([supervisor.toggle(), supervisor.toggle(), supervisor.toggle()])
   assert.equal(connects, 1)
   assert.equal(supervisor.state().phase, "connected")
-  assert.equal(supervisor.chip(), "● VOICE")
+  assert.equal(supervisor.chip(), "● VOX")
   await supervisor.stop()
-  assert.equal(supervisor.chip(), "○ voice")
+  assert.equal(supervisor.chip(), "○ vox")
 })
 
 test("audio after stop does not flip the chip back on", async () => {
@@ -316,12 +316,12 @@ test("audio after stop does not flip the chip back on", async () => {
   })
   await supervisor.start()
   onAudioDelta?.(Buffer.from([1, 2]))
-  assert.equal(supervisor.chip(), "● VOICE")
+  assert.equal(supervisor.chip(), "● VOX")
   await supervisor.stop()
   assert.equal(supervisor.state().phase, "off")
   onAudioDelta?.(Buffer.from([3, 4]))
   assert.equal(supervisor.state().phase, "off")
-  assert.equal(supervisor.chip(), "○ voice")
+  assert.equal(supervisor.chip(), "○ vox")
 })
 
 test("live models keep the microphone open while the assistant is speaking", async () => {

@@ -3,7 +3,7 @@ import { resolveOpenAiApiKey } from "./auth.ts"
 import { readPersistedVoiceState } from "./persist.ts"
 import { resolveOptions } from "./types.ts"
 
-const ID = "voice.supervisor"
+const ID = "vox.code"
 
 const server: PluginModule["server"] = async (input, options) => {
   const resolved = resolveOptions(options)
@@ -14,8 +14,8 @@ const server: PluginModule["server"] = async (input, options) => {
 
   return {
     tool: {
-      voice_status: tool({
-        description: "Show the OpenCode voice supervisor chip state, connection, and owned worker sessions.",
+      vox_status: tool({
+        description: "Show the Vox Code chip state, connection, and owned worker sessions.",
         args: {},
         async execute() {
           const state = readPersistedVoiceState()
@@ -37,7 +37,7 @@ const server: PluginModule["server"] = async (input, options) => {
               })
               return key.key ? `api key: ${key.source}` : `api key: missing — ${key.hint}`
             })(),
-            "Turn voice on from the TUI with /voice or Ctrl+Shift+V.",
+            "Turn Vox Code on from the TUI with /vox or Ctrl+Shift+V.",
           ]
             .filter(Boolean)
             .join("\n")

@@ -193,11 +193,11 @@ export function chipLabel(state: VoiceUiState): string {
   const normalized = normalizeVoiceState(state)
   switch (normalized.phase) {
     case "off":
-      return "○ voice"
+      return "○ vox"
     case "error":
       return "● error"
     default:
-      return "● VOICE"
+      return "● VOX"
   }
 }
 

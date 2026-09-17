@@ -111,7 +111,7 @@ export function createVoiceSupervisor(input: {
   }
 
   const toast = (message: string, variant: "info" | "success" | "warning" | "error" = "info") => {
-    input.hooks?.toast?.({ title: "Voice", message, variant })
+    input.hooks?.toast?.({ title: "Vox Code", message, variant })
   }
 
   const toolCtx = () => ({
@@ -207,13 +207,13 @@ export function createVoiceSupervisor(input: {
             if (stopping) return
             voiceLog("connected", options.model)
             setState({ phase: "connected", realtimeConnected: true })
-            toast("Voice connected.", "success")
+            toast("Vox Code connected.", "success")
           },
           onClose: () => {
             voiceLog("socket closed", { phase: state.phase, stopping })
             if (stopping || state.phase === "off") return
             void stop({ silent: true, reason: "socket" })
-            toast("Voice disconnected.", "warning")
+            toast("Vox Code disconnected.", "warning")
           },
           onError: (message) => {
             voiceLog("error", message)
@@ -295,7 +295,7 @@ export function createVoiceSupervisor(input: {
     if (!input.audio) audio = undefined
     setState({ phase: "off", realtimeConnected: false, error: undefined })
     stopping = false
-    if (!opts?.silent) toast("Voice off.")
+    if (!opts?.silent) toast("Vox Code off.")
   }
 
   const sessionLive = () =>
@@ -333,12 +333,12 @@ export function createVoiceSupervisor(input: {
       const next = model.trim()
       if (!next || next === CUSTOM_REALTIME_MODEL) return
       if (next === options.model) {
-        toast(`Voice model is already ${next}.`)
+        toast(`Vox Code model is already ${next}.`)
         return
       }
       options = { ...options, model: next }
       input.hooks?.onModelChange?.(next)
-      toast(`Voice model: ${next}`)
+      toast(`Vox Code model: ${next}`)
       notify()
       await restartIfLive("model")
     },
@@ -346,12 +346,12 @@ export function createVoiceSupervisor(input: {
       const next = voice.trim()
       if (!next) return
       if (next === options.voice) {
-        toast(`Voice is already ${displayVoice(next)}.`)
+        toast(`${displayVoice(next)} is already the Vox Code speaker.`)
         return
       }
       options = { ...options, voice: next }
       input.hooks?.onVoiceChange?.(next)
-      toast(`Voice: ${displayVoice(next)}`)
+      toast(`Vox: ${displayVoice(next)}`)
       notify()
       await restartIfLive("voice")
     },
@@ -360,12 +360,12 @@ export function createVoiceSupervisor(input: {
       const next =
         trimmed && trimmed !== defaultSpokenInstructions(options.model) ? trimmed : undefined
       if ((options.instructions ?? undefined) === next) {
-        toast(next ? "Voice prompt unchanged." : "Voice prompt is already the default.")
+        toast(next ? "Vox Code prompt unchanged." : "Vox Code prompt is already the default.")
         return
       }
       options = { ...options, instructions: next }
       input.hooks?.onInstructionsChange?.(next)
-      toast(next ? "Voice prompt saved." : "Voice prompt reset to default.")
+      toast(next ? "Vox Code prompt saved." : "Vox Code prompt reset to default.")
       notify()
       await restartIfLive("prompt")
     },

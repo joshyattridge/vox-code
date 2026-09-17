@@ -3,7 +3,7 @@ import { voiceMeta } from "./types.ts"
 
 export const TTS_SAMPLE_MODEL = "gpt-4o-mini-tts"
 export const DEFAULT_VOICE_SAMPLE =
-  "Hi. This is how I sound as your OpenCode voice supervisor. I'll keep spoken replies short."
+  "Hi. This is how I sound in Vox Code. I'll keep spoken replies short."
 
 export function sampleTextForVoice(voice: string) {
   return voiceMeta(voice)?.sample ?? DEFAULT_VOICE_SAMPLE
