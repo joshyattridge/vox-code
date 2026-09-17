@@ -3,12 +3,13 @@
  * One-command install for Vox Code.
  *
  *   npx github:joshyattridge/vox-code
- *   opencode plugin -g github:joshyattridge/vox-code
  *
- * OpenCode writes both opencode.json (server) and tui.json (chip / /vox).
+ * Copies the plugin into ~/.config/opencode/plugins/vox-code (outside
+ * node_modules) so OpenCode's TUI actually renders the chip. A bare
+ * `opencode plugin -g github:…` writes config but the chip stays invisible.
  */
 import { spawnSync } from "node:child_process"
-import { existsSync } from "node:fs"
+import { cpSync, existsSync, mkdirSync, rmSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -22,16 +23,18 @@ function parseArgs(argv) {
   const args = {
     help: false,
     dryRun: false,
-    force: false,
+    force: true,
     local: false,
+    github: false,
     global: true,
-    spec: process.env.VOX_PLUGIN_SPEC?.trim() || GIT_SPEC,
+    spec: process.env.VOX_PLUGIN_SPEC?.trim() || "",
   }
   for (const raw of argv) {
     if (raw === "-h" || raw === "--help") args.help = true
     else if (raw === "--dry-run") args.dryRun = true
     else if (raw === "--force") args.force = true
     else if (raw === "--local") args.local = true
+    else if (raw === "--github") args.github = true
     else if (raw === "--global") args.global = true
     else if (raw === "--project") {
       args.local = false
@@ -49,12 +52,16 @@ function help() {
 
 Usage:
   npx github:joshyattridge/vox-code
-  opencode plugin -g github:joshyattridge/vox-code
+
+This copies Vox Code into ~/.config/opencode/plugins/vox-code and registers
+that folder. Do not use \`opencode plugin -g github:joshyattridge/vox-code\`
+alone — OpenCode stores GitHub plugins under node_modules, and the TUI chip
+does not render from there.
 
 Options:
   --local      install from this checkout (absolute path, global config)
   --project    install into the current project's .opencode config
-  --force      replace an existing plugin entry
+  --github     pass github:joshyattridge/vox-code to opencode plugin (no chip)
   --spec=NAME  npm/git spec to pass to opencode plugin
   --dry-run    print the command without running it
   -h, --help   show this help
@@ -100,6 +107,30 @@ function findOpencode() {
   if (existsSync(fallback)) return fallback
 }
 
+function configDir() {
+  if (process.env.OPENCODE_CONFIG_DIR?.trim()) return resolve(process.env.OPENCODE_CONFIG_DIR.trim())
+  const xdg = process.env.XDG_CONFIG_HOME?.trim()
+  return join(xdg || join(homedir(), ".config"), "opencode")
+}
+
+function stagedPluginDir() {
+  return join(configDir(), "plugins", "vox-code")
+}
+
+function copyPlugin(from, to) {
+  if (!existsSync(join(from, "src/tui.tsx")) || !existsSync(join(from, "package.json"))) {
+    throw new Error(`Vox Code sources missing in ${from}`)
+  }
+  mkdirSync(dirname(to), { recursive: true })
+  rmSync(to, { recursive: true, force: true })
+  mkdirSync(to, { recursive: true })
+  for (const name of ["src", "package.json", "README.md"]) {
+    const src = join(from, name)
+    if (!existsSync(src)) continue
+    cpSync(src, join(to, name), { recursive: true })
+  }
+}
+
 function run(command, argv, dryRun) {
   const printable = [command, ...argv].map((part) => (/\s/.test(part) ? JSON.stringify(part) : part)).join(" ")
   if (dryRun) {
@@ -125,7 +156,7 @@ function audioHint() {
   else console.log("  sudo apt install sox alsa-utils")
 }
 
-export { GIT_SPEC, MIN_OPENCODE, parseArgs, pluginDir, versionAtLeast }
+export { GIT_SPEC, MIN_OPENCODE, parseArgs, pluginDir, stagedPluginDir, versionAtLeast }
 
 function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv)
@@ -134,9 +165,18 @@ function main(argv = process.argv.slice(2)) {
     return 0
   }
 
-  const spec = args.local ? pluginDir : args.spec
-  if (args.local && !existsSync(join(pluginDir, "src/tui.tsx"))) {
-    throw new Error(`This checkout is missing src/tui.tsx at ${pluginDir}`)
+  let spec = args.spec
+  if (args.local) spec = pluginDir
+  else if (args.github && !spec) spec = GIT_SPEC
+  else if (!spec) {
+    const dest = stagedPluginDir()
+    console.log(`Copying Vox Code to ${dest}`)
+    if (!args.dryRun) copyPlugin(pluginDir, dest)
+    spec = dest
+  }
+
+  if ((args.local || !args.github) && !args.spec && !existsSync(join(pluginDir, "src/tui.tsx"))) {
+    throw new Error(`This package is missing src/tui.tsx at ${pluginDir}`)
   }
 
   const opencode = findOpencode()
@@ -154,7 +194,7 @@ function main(argv = process.argv.slice(2)) {
 
   const pluginArgs = ["plugin", spec]
   if (args.global) pluginArgs.push("-g")
-  if (args.force) pluginArgs.push("-f")
+  pluginArgs.push("-f")
 
   console.log(`Installing ${spec} ${args.global ? "globally" : "into this project"}…`)
   const result = run(opencode, pluginArgs, args.dryRun)
@@ -165,14 +205,14 @@ function main(argv = process.argv.slice(2)) {
     throw new Error(
       `opencode plugin failed (${result.status}). Add this spec yourself if you need to:\n` +
         `  opencode.json  plugin: ["${spec}"]\n` +
-        `  tui.json       plugin: ["${spec}"]`,
+        `  tui.json       plugin: ["${spec}/src/tui.tsx"]`,
     )
   }
 
   if (!args.dryRun) {
     console.log("")
     console.log("Installed. Fully quit OpenCode and start it again.")
-    console.log("  ○ vox appears in the prompt")
+    console.log("  ○ vox appears on the right of the prompt")
     console.log("  /vox or Ctrl+Shift+V starts talking")
     console.log("  OpenAI key: opencode auth login  (platform API key, not ChatGPT OAuth)")
     audioHint()

@@ -42,8 +42,8 @@ test("installer prints one-command usage", () => {
   const result = spawnSync(process.execPath, [install, "--help"], { encoding: "utf8" })
   assert.equal(result.status, 0, result.stderr)
   assert.match(result.stdout, /Install Vox Code/)
-  assert.match(result.stdout, /opencode plugin -g github:joshyattridge\/vox-code/)
   assert.match(result.stdout, /npx github:joshyattridge\/vox-code/)
+  assert.match(result.stdout, /node_modules/)
 })
 
 test("installer dry-run uses this checkout with --local", () => {
@@ -52,4 +52,11 @@ test("installer dry-run uses this checkout with --local", () => {
   assert.match(result.stdout, /plugin/)
   assert.match(result.stdout, /-g/)
   assert.match(result.stdout, /vox-code/)
+})
+
+test("installer dry-run stages a file plugin outside node_modules", () => {
+  const result = spawnSync(process.execPath, [install, "--dry-run"], { encoding: "utf8" })
+  assert.equal(result.status, 0, result.stderr + result.stdout)
+  assert.match(result.stdout, /plugins\/vox-code/)
+  assert.doesNotMatch(result.stdout, /github:joshyattridge\/vox-code/)
 })

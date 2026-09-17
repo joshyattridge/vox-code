@@ -29,17 +29,15 @@ SSH into a remote OpenCode server uses **that** machine's mic. Run the TUI local
 
 ## Install
 
-One command. `opencode plugin` detects the `./server` and `./tui` entrypoints and writes **both** configs:
+One command:
 
 ```bash
 npx github:joshyattridge/vox-code
 ```
 
-```bash
-opencode plugin -g github:joshyattridge/vox-code
-```
+That copies Vox Code into `~/.config/opencode/plugins/vox-code` (outside `node_modules`) and registers the chip. Fully quit OpenCode and start it again. You should get a Vox Code toast, `○ vox` on the **right** of the prompt, and `/vox` in the slash list (`/voice` still works).
 
-Fully quit OpenCode and start it again. You should get a Vox Code toast, `○ vox` on the right of the prompt, and `/vox` in the slash list (`/voice` still works).
+Do **not** use `opencode plugin -g github:joshyattridge/vox-code` by itself. OpenCode will say “Installed”, but GitHub/npm TUI plugins load from `node_modules` and the chip never appears.
 
 Vox Code uses the **OpenAI key already saved in OpenCode** (`opencode auth login` / `/connect`, stored in `~/.local/share/opencode/auth.json`). You do not need to `export OPENAI_API_KEY` again if OpenCode can already talk to OpenAI.
 
@@ -52,38 +50,10 @@ npm install
 opencode
 ```
 
-To install this checkout globally instead of GitHub:
+To install this checkout globally:
 
 ```bash
 node scripts/install.mjs --local
-```
-
-Or add Vox Code to one project:
-
-```bash
-opencode plugin github:joshyattridge/vox-code
-```
-
-The package exports `./server` and `./tui`. A TUI file plugin must not export `server`. Manual config is only needed if you are not using `opencode plugin`:
-
-```jsonc
-// opencode.json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugin": [
-    ["github:joshyattridge/vox-code", { "voice": "marin", "model": "gpt-realtime" }]
-  ]
-}
-```
-
-```jsonc
-// tui.json  (required for the chip if you skip `opencode plugin`)
-{
-  "$schema": "https://opencode.ai/tui.json",
-  "plugin": [
-    ["github:joshyattridge/vox-code", { "voice": "marin", "model": "gpt-realtime" }]
-  ]
-}
 ```
 
 ## Use
