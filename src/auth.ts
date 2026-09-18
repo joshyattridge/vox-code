@@ -1,8 +1,9 @@
-import { readFileSync } from "node:fs"
+import { spawnSync } from "node:child_process"
+import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 
-export type ApiKeySource = "plugin" | "opencode-auth" | "env" | "dotenv" | "missing"
+export type ApiKeySource = "keychain" | "file" | "plugin" | "env" | "dotenv" | "missing"
 
 export type ResolvedApiKey = {
   key?: string
@@ -11,19 +12,125 @@ export type ResolvedApiKey = {
   hint: string
 }
 
-type AuthEntry = {
-  type?: string
-  key?: string
-  token?: string
-}
-
 const MISSING_HINT =
-  "No OpenAI API key in OpenCode. Run `opencode auth login` (OpenAI → API key) or `/connect`. ChatGPT/Codex OAuth cannot power Realtime. OPENAI_API_KEY is also accepted if OpenCode already uses it."
+  "Voice needs its own OpenAI platform API key. Run `/voice-key` to save one. ChatGPT Plus/Codex OAuth cannot power Realtime."
 
-export function defaultAuthFile(): string {
+export function voiceCredentialsFile(): string {
   const xdg = process.env.XDG_DATA_HOME?.trim()
   const root = xdg ? xdg : join(homedir(), ".local/share")
-  return join(root, "opencode", "auth.json")
+  return join(root, "opencode", "vox-code", "credentials.json")
+}
+
+export function readVoiceApiKey(file = voiceCredentialsFile()): string | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as { apiKey?: unknown }
+    return typeof parsed.apiKey === "string" && parsed.apiKey.trim() ? parsed.apiKey.trim() : undefined
+  } catch {
+    return
+  }
+}
+
+function readKeychain(): string | undefined {
+  if (process.platform === "darwin") {
+    const result = spawnSync(
+      "/usr/bin/security",
+      ["find-generic-password", "-a", "api-key", "-s", "com.vox-code.openai", "-w"],
+      { encoding: "utf8", timeout: 5000 },
+    )
+    return result.status === 0 ? result.stdout.trim() || undefined : undefined
+  }
+  if (process.platform === "linux") {
+    const result = spawnSync(
+      "secret-tool",
+      ["lookup", "application", "vox-code", "provider", "openai"],
+      { encoding: "utf8", timeout: 5000 },
+    )
+    return result.status === 0 ? result.stdout.trim() || undefined : undefined
+  }
+  return
+}
+
+function saveKeychain(key: string): boolean {
+  if (process.platform === "darwin") {
+    if (!/^sk-[A-Za-z0-9_-]{20,}$/.test(key)) return false
+    const command = `add-generic-password -U -a api-key -s com.vox-code.openai -l Vox-Code-OpenAI -w ${key}\n`
+    return spawnSync("/usr/bin/security", ["-i"], { input: command, encoding: "utf8", timeout: 5000 }).status === 0
+  }
+  if (process.platform === "linux") {
+    const result = spawnSync(
+      "secret-tool",
+      ["store", "--label=Vox Code OpenAI API key", "application", "vox-code", "provider", "openai"],
+      { input: key, encoding: "utf8", timeout: 5000 },
+    )
+    return result.status === 0
+  }
+  return false
+}
+
+function deleteKeychain(): boolean {
+  if (process.platform === "darwin") {
+    const result = spawnSync(
+      "/usr/bin/security",
+      ["delete-generic-password", "-a", "api-key", "-s", "com.vox-code.openai"],
+      { encoding: "utf8", timeout: 5000 },
+    )
+    return result.status === 0
+  }
+  if (process.platform === "linux") {
+    const result = spawnSync(
+      "secret-tool",
+      ["clear", "application", "vox-code", "provider", "openai"],
+      { encoding: "utf8", timeout: 5000 },
+    )
+    return result.status === 0
+  }
+  return false
+}
+
+export function saveVoiceApiKey(apiKey: string, file?: string): "keychain" | "file" {
+  const key = apiKey.trim()
+  if (!key) throw new Error("Enter an OpenAI API key.")
+  if (!file && saveKeychain(key)) {
+    const fallback = voiceCredentialsFile()
+    if (existsSync(fallback)) unlinkSync(fallback)
+    return "keychain"
+  }
+  const target = file ?? voiceCredentialsFile()
+  mkdirSync(dirname(target), { recursive: true, mode: 0o700 })
+  writeFileSync(target, `${JSON.stringify({ apiKey: key }, null, 2)}\n`, { mode: 0o600 })
+  chmodSync(target, 0o600)
+  return "file"
+}
+
+export function removeVoiceApiKey(file?: string): boolean {
+  let removed = file ? false : deleteKeychain()
+  const target = file ?? voiceCredentialsFile()
+  if (existsSync(target)) {
+    unlinkSync(target)
+    removed = true
+  }
+  return removed
+}
+
+export async function validateOpenAiApiKey(
+  apiKey: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  const key = apiKey.trim()
+  if (!/^sk-[A-Za-z0-9_-]{20,}$/.test(key)) throw new Error("That does not look like an OpenAI platform API key.")
+  const response = await fetchImpl("https://api.openai.com/v1/models", {
+    headers: { Authorization: `Bearer ${key}` },
+    signal: AbortSignal.timeout(10_000),
+  })
+  if (response.ok) return
+  let detail = `OpenAI rejected the API key (${response.status}).`
+  try {
+    const body = (await response.json()) as { error?: { message?: string } }
+    if (body.error?.message) detail = body.error.message
+  } catch {
+    // Keep the status-based message.
+  }
+  throw new Error(detail)
 }
 
 function stripQuotes(value: string): string {
@@ -35,41 +142,6 @@ function stripQuotes(value: string): string {
     return trimmed.slice(1, -1)
   }
   return trimmed
-}
-
-function readJsonFile(path: string): Record<string, AuthEntry> | undefined {
-  try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return
-    return parsed as Record<string, AuthEntry>
-  } catch {
-    return
-  }
-}
-
-function keyFromEntry(entry: AuthEntry | undefined): string | undefined {
-  if (!entry || entry.type === "oauth") return
-  if (typeof entry.key === "string" && entry.key.trim()) return entry.key.trim()
-  if (entry.type === "wellknown" && typeof entry.token === "string" && entry.token.trim()) {
-    return entry.token.trim()
-  }
-  return
-}
-
-export function readOpenCodeAuthKey(
-  authFile = defaultAuthFile(),
-  providerIds: string[] = ["openai"],
-): { key?: string; provider?: string; oauthOnly?: boolean } {
-  const store = readJsonFile(authFile)
-  if (!store) return {}
-  let oauthOnly = false
-  for (const id of providerIds) {
-    const entry = store[id]
-    const key = keyFromEntry(entry)
-    if (key) return { key, provider: id }
-    if (entry?.type === "oauth") oauthOnly = true
-  }
-  return { oauthOnly }
 }
 
 function readDotEnvKey(directory: string | undefined, envName = "OPENAI_API_KEY"): string | undefined {
@@ -93,21 +165,20 @@ export function resolveOpenAiApiKey(input: {
   pluginKey?: string
   directory?: string
   env?: NodeJS.ProcessEnv
-  authFile?: string
+  voiceKeyFile?: string
 } = {}): ResolvedApiKey {
+  const keychainKey = input.voiceKeyFile === undefined ? readKeychain() : undefined
+  if (keychainKey) {
+    return { key: keychainKey, source: "keychain", hint: "Using the API key saved in the OS keychain." }
+  }
+  const voiceKey = readVoiceApiKey(input.voiceKeyFile)
+  if (voiceKey) {
+    return { key: voiceKey, source: "file", hint: "Using the private API key file saved by Voice." }
+  }
+
   const pluginKey = input.pluginKey?.trim()
   if (pluginKey) {
     return { key: pluginKey, source: "plugin", hint: "Using plugin apiKey option." }
-  }
-
-  const fromAuth = readOpenCodeAuthKey(input.authFile ?? defaultAuthFile())
-  if (fromAuth.key) {
-    return {
-      key: fromAuth.key,
-      source: "opencode-auth",
-      provider: fromAuth.provider,
-      hint: `Using OpenCode ${fromAuth.provider} API key from auth.json.`,
-    }
   }
 
   const env = input.env ?? process.env
@@ -121,8 +192,5 @@ export function resolveOpenAiApiKey(input: {
     return { key: fromDotenv, source: "dotenv", hint: "Using OPENAI_API_KEY from the project .env file." }
   }
 
-  const hint = fromAuth.oauthOnly
-    ? "OpenCode has an OpenAI OAuth login, but Realtime needs a platform API key. Run `opencode auth login` and choose OpenAI → API key."
-    : MISSING_HINT
-  return { source: "missing", hint }
+  return { source: "missing", hint: MISSING_HINT }
 }

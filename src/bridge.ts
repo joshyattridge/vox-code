@@ -25,6 +25,7 @@ export type VoiceBridgeHooks = {
   onModelChange?: (model: string) => void
   onVoiceChange?: (voice: string) => void
   onInstructionsChange?: (instructions?: string) => void
+  currentContext?: () => unknown | Promise<unknown>
 }
 
 function daemonFile() {
@@ -39,7 +40,7 @@ const EXTRA_BIN_DIRS = [
 
 export function isJsRuntime(execPath: string) {
   const name = basename(execPath).toLowerCase()
-  return name === "node" || name === "node.exe" || name === "bun" || name === "bun.exe" || name === "deno"
+  return name === "node" || name === "node.exe" || name === "bun" || name === "bun.exe"
 }
 
 function findBinary(name: string, pathEnv: string) {
@@ -63,7 +64,7 @@ export function resolveDaemonRuntime(input?: { execPath?: string; path?: string 
   if (node) return { cmd: node, kind: "node" as const }
   if (bun) return { cmd: bun, kind: "bun" as const }
   throw new Error(
-    "Vox Code daemon needs Node.js or Bun on PATH. OpenCode cannot run the daemon script itself.",
+    "Voice daemon needs Node.js or Bun on PATH. OpenCode cannot run the daemon script itself.",
   )
 }
 
@@ -115,7 +116,6 @@ function spawnDaemon(sockPath: string) {
     env: {
       ...process.env,
       VOICE_DAEMON: "1",
-      VOX_SOCK: sockPath,
       VOICE_SOCK: sockPath,
     },
   })
@@ -198,7 +198,7 @@ async function ensureSocket(sockPath: string, pidPath: string) {
       lastError = error
     }
   }
-  const detail = lastError instanceof Error ? lastError.message : "Vox Code daemon did not start"
+  const detail = lastError instanceof Error ? lastError.message : "Voice daemon did not start"
   throw new Error(`${detail}. Check ${voiceLogPath()}`)
 }
 
@@ -214,7 +214,7 @@ export async function attachVoiceDaemon(input: {
   connect?: (sockPath: string) => Promise<Socket>
   replaced?: boolean
 }): Promise<VoiceSupervisor> {
-  const sockPath = input.sockPath ?? process.env.VOX_SOCK ?? process.env.VOICE_SOCK ?? daemonSockPath()
+  const sockPath = input.sockPath ?? process.env.VOICE_SOCK ?? daemonSockPath()
   const pidPath = input.pidPath ?? daemonPidPath()
   const socket = input.connect ? await input.connect(sockPath) : await ensureSocket(sockPath, pidPath)
   socket.setEncoding("utf8")
@@ -280,16 +280,33 @@ export async function attachVoiceDaemon(input: {
         notify()
         return
       case "toast":
-        input.hooks?.toast?.({ title: "Vox Code", message: message.message, variant: message.variant })
+        input.hooks?.toast?.({ title: "Voice", message: message.message, variant: message.variant })
         return
       case "focus":
         void (async () => {
-          const focused = Boolean(await input.hooks?.focusSession?.(message.sessionId, message.directory))
-          send({ type: "focusResult", sessionId: message.sessionId, focused })
+          try {
+            const focused = Boolean(await input.hooks?.focusSession?.(message.sessionId, message.directory))
+            send({ type: "focusResult", sessionId: message.sessionId, focused })
+          } catch {
+            send({ type: "focusResult", sessionId: message.sessionId, focused: false })
+          }
         })()
         return
       case "rpc": {
         void (async () => {
+          if (message.op === "tui.currentContext") {
+            try {
+              const data = await input.hooks?.currentContext?.()
+              send({ type: "rpcResult", id: message.id, data, error: data === undefined ? { message: "Current TUI context is unavailable" } : undefined })
+            } catch (error) {
+              send({
+                type: "rpcResult",
+                id: message.id,
+                error: { message: error instanceof Error ? error.message : String(error) },
+              })
+            }
+            return
+          }
           if (!input.sessionClient) {
             send({ type: "rpcResult", id: message.id, error: { message: "TUI has no OpenCode client" } })
             return
@@ -323,6 +340,14 @@ export async function attachVoiceDaemon(input: {
   })
   socket.on("close", () => {
     voiceLog("bridge disconnected")
+    ui = {
+      ...ui,
+      phase: "error",
+      realtimeConnected: false,
+      error: "Voice daemon disconnected.",
+    }
+    statusText = "phase: error\nrealtime: down\nerror: Voice daemon disconnected."
+    notify()
   })
 
   send({
@@ -333,12 +358,22 @@ export async function attachVoiceDaemon(input: {
     sessionId: input.sessionId,
   })
   await waitFor(() => ready, 4000)
+  if (!ready || socket.destroyed) {
+    socket.destroy()
+    listeners.clear()
+    throw new Error("Voice daemon did not complete its startup handshake.")
+  }
   await waitFor(() => gotState, 2000)
   if (protocol < VOICE_PROTOCOL && !input.replaced && !input.connect) {
     voiceLog("replacing old voice daemon", { protocol })
     socket.end()
     await stopDaemonProcess(sockPath, pidPath)
     return attachVoiceDaemon({ ...input, replaced: true, connect: undefined })
+  }
+  if (!gotState || protocol !== VOICE_PROTOCOL) {
+    socket.destroy()
+    listeners.clear()
+    throw new Error("Voice daemon protocol mismatch. Quit and restart OpenCode.")
   }
 
   function subscribe(listener: () => void) {
@@ -379,10 +414,33 @@ export async function attachVoiceDaemon(input: {
       const expected = next?.trim() || undefined
       await waitFor(() => (instructions?.trim() || undefined) === expected)
     },
+    async setApiKey(apiKey) {
+      send({ type: "setApiKey", apiKey })
+    },
+    async removeApiKey() {
+      send({ type: "removeApiKey" })
+    },
     async previewVoice(next) {
       send({ type: "previewVoice", voice: next })
     },
-    statusText: () => statusText,
+    statusText: () => {
+      const formatDuration = (milliseconds: number) => {
+        const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000))
+        const hours = Math.floor(totalSeconds / 3600)
+        const minutes = Math.floor((totalSeconds % 3600) / 60)
+        const seconds = totalSeconds % 60
+        return hours ? `${hours}h ${minutes}m ${seconds}s` : `${minutes}m ${seconds}s`
+      }
+      const activeMs = (ui.completedActiveMs ?? 0) + (ui.connectedSince ? Date.now() - ui.connectedSince : 0)
+      let current = statusText.replace(/^active: .*$/m, `active: ${formatDuration(activeMs)}`)
+      if (ui.lastActivityAt) {
+        current = current.replace(/^inactive: .*$/m, `inactive: ${formatDuration(Date.now() - ui.lastActivityAt)}`)
+      }
+      if (ui.reconnectAt) {
+        current = current.replace(/^retry in: .*$/m, `retry in: ${Math.max(0, Math.ceil((ui.reconnectAt - Date.now()) / 1000))}s`)
+      }
+      return current
+    },
     handleIdle(sessionId) {
       send({ type: "idle", sessionId })
     },

@@ -28,7 +28,7 @@ export type SessionController = {
 }
 
 function statusOf(map: Record<string, { type: string }> | undefined, id: string): string {
-  return map?.[id]?.type ?? "idle"
+  return map ? map[id]?.type ?? "idle" : "unknown"
 }
 
 const LAST_MESSAGE_CHARS = 1500
@@ -121,7 +121,7 @@ export function createSessionController(
       const [sessions, statuses] = await Promise.all([
         listRaw(),
         unwrap(client.session.status(defaultDirectory() ? { directory: defaultDirectory() } : undefined), "session status").catch(
-          () => ({}) as Record<string, { type: string }>,
+          () => undefined,
         ),
       ])
       const rows = sessions.map((session) => ({
@@ -135,13 +135,16 @@ export function createSessionController(
       for (const id of owned) {
         if (seen.has(id)) continue
         try {
-          const info = await unwrap(client.session.get({ sessionID: id, ...scopeFor(id) }), "get session")
+          const [info, workerStatuses] = await Promise.all([
+            unwrap(client.session.get({ sessionID: id, ...scopeFor(id) }), "get session"),
+            unwrap(client.session.status(scopeFor(id)), "session status").catch(() => undefined),
+          ])
           if (info.directory) dirs.set(info.id, info.directory)
           rows.push({
             id: info.id,
             title: info.title,
             directory: info.directory,
-            status: statusOf(statuses, info.id),
+            status: statusOf(workerStatuses, info.id),
             owned: true,
           })
         } catch {
@@ -202,7 +205,7 @@ export function createSessionController(
       const [info, statuses] = await Promise.all([
         unwrap(client.session.get({ sessionID: sessionId, ...scoped }), "get session"),
         unwrap(client.session.status(scoped.directory ? scoped : undefined), "session status").catch(
-          () => ({}) as Record<string, { type: string }>,
+          () => undefined,
         ),
       ])
       let summary: string | undefined
@@ -239,7 +242,7 @@ export function createSessionController(
         title: info.title,
         status,
         owned: owned.has(info.id),
-        complete: !running && Boolean(lastMessage),
+        complete: status !== "unknown" && !running && Boolean(lastMessage),
         summary,
         lastMessage,
       }

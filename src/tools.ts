@@ -5,6 +5,7 @@ export type ToolContext = {
   currentSessionId?: string
   warnSharedCheckout?: boolean
   directory?: string
+  currentContext?: () => Promise<unknown>
 }
 
 export type ToolContextInput = ToolContext | (() => ToolContext)
@@ -20,6 +21,13 @@ export type ToolResult = {
 }
 
 export const REALTIME_TOOLS = [
+  {
+    type: "function",
+    name: "current_context",
+    description:
+      "Get a bounded snapshot of the currently focused OpenCode TUI: route, session, model, recent text messages, and changed-file summaries. Use this when the user refers to what they are looking at, this conversation, or the current screen.",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+  },
   {
     type: "function",
     name: "list_sessions",
@@ -126,7 +134,7 @@ export async function executeTool(
   voiceLog("tool", { name, args })
   try {
     const result = await runTool(name, args, sessions, ctx, focus)
-    voiceLog("tool ok", { name, output: result.output })
+    voiceLog("tool ok", name === "current_context" ? { name, output: "[bounded TUI context]" } : { name, output: result.output })
     return result
   } catch (error) {
     voiceLog("tool error", { name, error: error instanceof Error ? error.message : String(error) })
@@ -142,6 +150,10 @@ async function runTool(
   focus?: FocusHandler,
 ): Promise<ToolResult> {
   switch (name) {
+    case "current_context": {
+      if (!ctx.currentContext) throw new Error("Current TUI context is unavailable")
+      return { name, output: await ctx.currentContext() }
+    }
     case "list_sessions": {
       const list = await sessions.list()
       return { name, output: { sessions: list } }

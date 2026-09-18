@@ -1,6 +1,7 @@
 export type VoicePhase =
   | "off"
   | "connecting"
+  | "reconnecting"
   | "connected"
   | "listening"
   | "speaking"
@@ -12,6 +13,17 @@ export type VoiceUiState = {
   lastUserTranscript?: string
   lastAssistantTranscript?: string
   realtimeConnected: boolean
+  desiredOn: boolean
+  model?: string
+  voice?: string
+  customInstructions?: boolean
+  reconnectAttempt?: number
+  reconnectAt?: number
+  sessionStartedAt?: number
+  connectedSince?: number
+  completedActiveMs?: number
+  lastActivityAt?: number
+  costWarningShown?: boolean
   ownedSessionIds: string[]
 }
 
@@ -22,12 +34,20 @@ export type VoiceOptions = {
   keybind?: string
   instructions?: string
   backendModel?: string
+  autoReconnect?: boolean
+  inactivityTimeoutMinutes?: number
+  costWarningMinutes?: number
+  maxSessionDurationMinutes?: number
+  autoStopOnOpenCodeExit?: boolean
 }
 
 export const DEFAULT_MODEL = "gpt-realtime"
 export const DEFAULT_VOICE = "marin"
 export const DEFAULT_KEYBIND = "ctrl+shift+v"
 export const DEFAULT_BACKEND_MODEL = "gpt-5.6-luna"
+export const DEFAULT_INACTIVITY_TIMEOUT_MINUTES = 10
+export const DEFAULT_COST_WARNING_MINUTES = 30
+export const DEFAULT_MAX_SESSION_DURATION_MINUTES = 60
 export const SAMPLE_RATE = 24000
 export const CUSTOM_REALTIME_MODEL = "__custom__"
 
@@ -156,7 +176,20 @@ export type PermissionReply = "once" | "always" | "reject"
 
 export function resolveOptions(
   raw: Record<string, unknown> | undefined,
-): Required<Pick<VoiceOptions, "model" | "voice" | "keybind" | "backendModel">> & VoiceOptions {
+): Required<
+  Pick<
+    VoiceOptions,
+    | "model"
+    | "voice"
+    | "keybind"
+    | "backendModel"
+    | "autoReconnect"
+    | "inactivityTimeoutMinutes"
+    | "costWarningMinutes"
+    | "maxSessionDurationMinutes"
+    | "autoStopOnOpenCodeExit"
+  >
+> & VoiceOptions {
   const model =
     (typeof raw?.model === "string" && raw.model) ||
     process.env.OPENAI_REALTIME_MODEL ||
@@ -173,14 +206,36 @@ export function resolveOptions(
     DEFAULT_BACKEND_MODEL
   const apiKey = typeof raw?.apiKey === "string" && raw.apiKey.trim() ? raw.apiKey.trim() : undefined
   const instructions = typeof raw?.instructions === "string" ? raw.instructions : undefined
-  return { model, voice, keybind, backendModel, apiKey, instructions }
+  const duration = (name: string, fallback: number) => {
+    const value = raw?.[name]
+    return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : fallback
+  }
+  const autoReconnect = typeof raw?.autoReconnect === "boolean" ? raw.autoReconnect : true
+  const autoStopOnOpenCodeExit =
+    typeof raw?.autoStopOnOpenCodeExit === "boolean" ? raw.autoStopOnOpenCodeExit : true
+  const inactivityTimeoutMinutes = duration("inactivityTimeoutMinutes", DEFAULT_INACTIVITY_TIMEOUT_MINUTES)
+  const costWarningMinutes = duration("costWarningMinutes", DEFAULT_COST_WARNING_MINUTES)
+  const maxSessionDurationMinutes = duration("maxSessionDurationMinutes", DEFAULT_MAX_SESSION_DURATION_MINUTES)
+  return {
+    model,
+    voice,
+    keybind,
+    backendModel,
+    apiKey,
+    instructions,
+    autoReconnect,
+    autoStopOnOpenCodeExit,
+    inactivityTimeoutMinutes,
+    costWarningMinutes,
+    maxSessionDurationMinutes,
+  }
 }
 
 export function normalizeVoiceState(state: VoiceUiState): VoiceUiState {
   if (state.phase === "error") {
     return { ...state, realtimeConnected: false }
   }
-  if (state.phase === "connecting") {
+  if (state.phase === "connecting" || state.phase === "reconnecting") {
     return { ...state, realtimeConnected: false }
   }
   if (!state.realtimeConnected) {
@@ -193,11 +248,15 @@ export function chipLabel(state: VoiceUiState): string {
   const normalized = normalizeVoiceState(state)
   switch (normalized.phase) {
     case "off":
-      return "○ vox"
+      return "○ voice"
     case "error":
       return "● error"
+    case "connecting":
+      return "◌ voice"
+    case "reconnecting":
+      return "◌ reconnecting"
     default:
-      return "● VOX"
+      return "● VOICE"
   }
 }
 
@@ -205,6 +264,7 @@ export function initialVoiceState(): VoiceUiState {
   return {
     phase: "off",
     realtimeConnected: false,
+    desiredOn: false,
     ownedSessionIds: [],
   }
 }

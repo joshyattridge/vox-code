@@ -27,7 +27,7 @@ function parseArgs(argv) {
     local: false,
     github: false,
     global: true,
-    spec: process.env.VOX_PLUGIN_SPEC?.trim() || "",
+    spec: process.env.VOICE_PLUGIN_SPEC?.trim() || "",
   }
   for (const raw of argv) {
     if (raw === "-h" || raw === "--help") args.help = true
@@ -48,7 +48,7 @@ function parseArgs(argv) {
 }
 
 function help() {
-  return `Install Vox Code (chip, /vox, background daemon).
+  return `Install Vox Code (chip, /voice, background daemon).
 
 Usage:
   npx github:joshyattridge/vox-code
@@ -118,13 +118,14 @@ function stagedPluginDir() {
 }
 
 function copyPlugin(from, to) {
+  if (resolve(from) === resolve(to)) return
   if (!existsSync(join(from, "src/tui.tsx")) || !existsSync(join(from, "package.json"))) {
     throw new Error(`Vox Code sources missing in ${from}`)
   }
   mkdirSync(dirname(to), { recursive: true })
   rmSync(to, { recursive: true, force: true })
   mkdirSync(to, { recursive: true })
-  for (const name of ["src", "package.json", "README.md"]) {
+  for (const name of ["src", "scripts", "docs", "package.json", "package-lock.json", "README.md"]) {
     const src = join(from, name)
     if (!existsSync(src)) continue
     cpSync(src, join(to, name), { recursive: true })
@@ -165,6 +166,21 @@ function main(argv = process.argv.slice(2)) {
     return 0
   }
 
+  const opencode = args.dryRun ? "opencode" : findOpencode()
+  if (!opencode) {
+    throw new Error(`OpenCode is not installed (need ${MIN_OPENCODE}+).\nInstall it from https://opencode.ai then re-run.`)
+  }
+  if (!args.dryRun) {
+    const versionResult = spawnSync(opencode, ["--version"], { encoding: "utf8" })
+    const version = (versionResult.stdout || "").trim().split(/\s+/)[0]
+    if (versionResult.status !== 0 || !/^v?\d+\.\d+\.\d+/.test(version)) {
+      throw new Error("Could not determine the installed OpenCode version.")
+    }
+    if (!versionAtLeast(version, MIN_OPENCODE)) {
+      throw new Error(`OpenCode ${version} is too old. Upgrade to ${MIN_OPENCODE}+ (opencode upgrade).`)
+    }
+  }
+
   let spec = args.spec
   if (args.local) spec = pluginDir
   else if (args.github && !spec) spec = GIT_SPEC
@@ -172,24 +188,15 @@ function main(argv = process.argv.slice(2)) {
     const dest = stagedPluginDir()
     console.log(`Copying Vox Code to ${dest}`)
     if (!args.dryRun) copyPlugin(pluginDir, dest)
+    // The detached Node daemon resolves ws from the staged folder; it cannot
+    // rely on OpenCode's Bun plugin cache or this npx process's node_modules.
+    const dependencies = run("npm", ["install", "--prefix", dest, "--omit=dev", "--omit=optional", "--ignore-scripts"], args.dryRun)
+    if (dependencies.status !== 0) throw new Error(`Could not install Voice runtime dependencies: ${dependencies.stderr}`)
     spec = dest
   }
 
   if ((args.local || !args.github) && !args.spec && !existsSync(join(pluginDir, "src/tui.tsx"))) {
     throw new Error(`This package is missing src/tui.tsx at ${pluginDir}`)
-  }
-
-  const opencode = findOpencode()
-  if (!opencode) {
-    throw new Error(
-      `OpenCode is not installed (need ${MIN_OPENCODE}+).\nInstall it from https://opencode.ai then re-run.`,
-    )
-  }
-
-  const versionResult = spawnSync(opencode, ["--version"], { encoding: "utf8" })
-  const version = (versionResult.stdout || versionResult.stderr || "").trim().split(/\s+/)[0]
-  if (version && !versionAtLeast(version, MIN_OPENCODE)) {
-    throw new Error(`OpenCode ${version} is too old. Upgrade to ${MIN_OPENCODE}+ (opencode upgrade).`)
   }
 
   const pluginArgs = ["plugin", spec]
@@ -212,9 +219,9 @@ function main(argv = process.argv.slice(2)) {
   if (!args.dryRun) {
     console.log("")
     console.log("Installed. Fully quit OpenCode and start it again.")
-    console.log("  ○ vox appears on the right of the prompt")
-    console.log("  /vox or Ctrl+Shift+V starts talking")
-    console.log("  OpenAI key: opencode auth login  (platform API key, not ChatGPT OAuth)")
+    console.log("  ○ voice appears on the right of the prompt")
+    console.log("  /voice-key saves a Voice-only OpenAI platform API key")
+    console.log("  /voice or Ctrl+Shift+V starts talking")
     audioHint()
   }
   return 0

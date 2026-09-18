@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer"
-import WebSocket from "ws"
+import { attachSocket as attach, handshake, openSocket } from "./socket.ts"
 import { LIVE_BACKEND_INSTRUCTIONS, resolveSpokenInstructions } from "./instructions.ts"
 import { voiceLog } from "./log.ts"
 import type { RealtimeHandlers, RealtimeSession, SocketLike } from "./realtime.ts"
@@ -14,30 +14,9 @@ type LiveEvent = {
 }
 
 const OPEN = 1
-const AUDIO_GAP_MS = 40
-
-function attach(
-  socket: SocketLike,
-  handlers: { message: (raw: string) => void; close: () => void; error: (err: string) => void },
-) {
-  if (typeof socket.addEventListener === "function") {
-    socket.addEventListener("message", (event) => {
-      const data = event.data
-      handlers.message(typeof data === "string" ? data : String(data))
-    })
-    socket.addEventListener("close", () => handlers.close())
-    socket.addEventListener("error", (event) => handlers.error(event.message ?? "WebSocket error"))
-    return
-  }
-  socket.on?.("message", (data: unknown) => {
-    const text = typeof data === "string" ? data : Buffer.isBuffer(data) ? data.toString("utf8") : String(data)
-    handlers.message(text)
-  })
-  socket.on?.("close", () => handlers.close())
-  socket.on?.("error", (error: unknown) => {
-    handlers.error(error instanceof Error ? error.message : String(error))
-  })
-}
+// Live has no audio-done event. This is only a playback-idle heuristic.
+const AUDIO_GAP_MS = 250
+const TRANSCRIPT_CHARS = 4000
 
 export function liveConnectConfig(options: { apiKey: string }) {
   return {
@@ -91,10 +70,17 @@ export function createLiveSession(
   let commentSeq = 0
   let toolSeq = 0
   let loggedAudio = false
+  let closed = false
+  let closing = false
+  let closeTimer: ReturnType<typeof setTimeout> | undefined
+  let opened = false
+  let continuationNeeded = false
+  const activeResponses = new Set<string>()
+  const seenToolCalls = new Set<string>()
   const pendingToolCalls = new Set<string>()
 
   const send = (payload: unknown) => {
-    if (socket.readyState !== OPEN) return
+    if (closed || closing || socket.readyState !== OPEN) return
     socket.send(JSON.stringify(payload))
   }
 
@@ -102,12 +88,21 @@ export function createLiveSession(
     if (audioGap) clearTimeout(audioGap)
     audioGap = setTimeout(() => {
       audioGap = undefined
-      void handlers.onAudioDone?.()
+      void Promise.resolve(handlers.onAudioDone?.()).catch((error) => handlers.onError?.(String(error)))
     }, AUDIO_GAP_MS)
     audioGap.unref?.()
   }
 
+  const continueResponse = () => {
+    if (closed || closing || !continuationNeeded || activeResponses.size || pendingToolCalls.size) return
+    continuationNeeded = false
+    toolSeq += 1
+    send({ type: "response.create", event_id: `continue_${toolSeq}` })
+  }
+
   const handleToolCall = async (name: string, callId: string, args: Record<string, unknown>) => {
+    if (closed || closing || seenToolCalls.has(callId)) return
+    seenToolCalls.add(callId)
     pendingToolCalls.add(callId)
     let output: unknown
     try {
@@ -132,30 +127,37 @@ export function createLiveSession(
       },
     })
     pendingToolCalls.delete(callId)
-    if (pendingToolCalls.size === 0) {
-      toolSeq += 1
-      send({ type: "response.create", event_id: `continue_${toolSeq}` })
-    }
+    continuationNeeded = true
+    continueResponse()
   }
 
   attach(socket, {
     message: (raw) => {
+      if (closed) return
       let event: LiveEvent
       try {
         event = JSON.parse(raw) as LiveEvent
       } catch {
         return
       }
+      if (closing && event.type !== "session.closed") return
       try {
       switch (event.type) {
         case "session.started":
-          handlers.onOpen?.()
+          if (!opened) {
+            opened = true
+            handlers.onOpen?.()
+          }
           break
         case "session.updated":
           break
         case "session.closed":
+          closed = true
+          if (closeTimer) clearTimeout(closeTimer)
+          if (audioGap) clearTimeout(audioGap)
           voiceLog("live session.closed", event)
-          handlers.onClose?.("session.closed")
+          socket.close()
+          if (!closing) handlers.onClose?.("session.closed")
           break
         case "error": {
           const error = event.error as { message?: string; code?: string } | undefined
@@ -167,7 +169,7 @@ export function createLiveSession(
         case "session.input_transcript.delta": {
           const delta = typeof event.delta === "string" ? event.delta : ""
           if (!delta) break
-          userTranscript += delta
+          userTranscript = (userTranscript + delta).slice(-TRANSCRIPT_CHARS)
           handlers.onSpeechStarted?.()
           handlers.onTranscript?.("user", userTranscript)
           break
@@ -175,7 +177,7 @@ export function createLiveSession(
         case "session.output_transcript.delta": {
           const delta = typeof event.delta === "string" ? event.delta : ""
           if (!delta) break
-          assistantTranscript += delta
+          assistantTranscript = (assistantTranscript + delta).slice(-TRANSCRIPT_CHARS)
           handlers.onTranscript?.("assistant", assistantTranscript)
           break
         }
@@ -199,13 +201,25 @@ export function createLiveSession(
         }
         case "response.event": {
           const inner = event.event as LiveEvent | undefined
+          const responseKey = typeof event.delegation_id === "string" ? event.delegation_id : "default"
+          if (inner?.type === "response.created") {
+            activeResponses.add(responseKey)
+            break
+          }
+          if (inner && ["response.completed", "response.failed", "response.incomplete", "response.cancelled"].includes(inner.type)) {
+            activeResponses.delete(responseKey)
+            continueResponse()
+            break
+          }
           if (inner?.type !== "response.output_item.done") break
           const item = inner.item as
             | { type?: string; call_id?: string; name?: string; arguments?: string }
             | undefined
           if (item?.type !== "function_call" || !item.name || !item.call_id) break
+          if (seenToolCalls.has(item.call_id)) break
+          activeResponses.add(responseKey)
           const args = parseToolArgs(item.arguments)
-          void handleToolCall(item.name, item.call_id, args)
+          void handleToolCall(item.name, item.call_id, args).catch((error) => handlers.onError?.(String(error)))
           break
         }
         default:
@@ -221,8 +235,11 @@ export function createLiveSession(
       }
     },
     close: () => {
+      if (closed) return
+      closed = true
+      if (closeTimer) clearTimeout(closeTimer)
       if (audioGap) clearTimeout(audioGap)
-      handlers.onClose?.("closed")
+      if (!closing) handlers.onClose?.("closed")
     },
     error: (message) => handlers.onError?.(message),
   })
@@ -238,41 +255,38 @@ export function createLiveSession(
         audio: bytes.subarray(0, completeLength).toString("base64"),
       })
     },
-    injectText(text) {
+    injectText(text, speak = true) {
       commentSeq += 1
       send({
-        type: "session.commentary.append",
+        type: speak ? "session.commentary.append" : "session.thinking.append",
         event_id: `comment_${commentSeq}`,
         delegation_id: null,
         content: text.slice(0, 2000),
       })
     },
     close() {
+      if (closed || closing) return
       if (audioGap) clearTimeout(audioGap)
-      send({ type: "session.close" })
-      try {
+      if (!opened) {
+        closed = true
         socket.close()
-      } catch {
-        // ignore
+        return
       }
+      send({ type: "session.close" })
+      closing = true
+      // Allow final usage/session.closed to drain before releasing the socket.
+      closeTimer = setTimeout(() => {
+        closed = true
+        socket.close()
+      }, 1000)
+      closeTimer.unref?.()
     },
   }
 }
 
 export async function connectLiveSocket(options: { apiKey: string }): Promise<SocketLike> {
   const { url, headers } = liveConnectConfig(options)
-
-  const globalWs = (globalThis as { WebSocket?: new (url: string, extra?: unknown) => SocketLike }).WebSocket
-  if (globalWs && process.versions.bun) {
-    return new globalWs(url, { headers } as never)
-  }
-
-  const socket = new WebSocket(url, { headers })
-  await new Promise<void>((resolve, reject) => {
-    socket.once("open", () => resolve())
-    socket.once("error", (error) => reject(error))
-  })
-  return socket as unknown as SocketLike
+  return openSocket(url, headers)
 }
 
 export function openLive(options: {
@@ -290,49 +304,13 @@ export function openLive(options: {
   const start = async () => {
     const socket = options.socket ?? (await connectLiveSocket({ apiKey: options.apiKey }))
     const session = createLiveSession(socket, options.handlers, options.sessions, options.toolCtx, options.focus)
-    const send = (payload: unknown) => {
-      if (socket.readyState === OPEN) socket.send(JSON.stringify(payload))
+    try {
+      await handshake(socket, sessionStartPayload(options), "session.started", "Live")
+      return session
+    } catch (error) {
+      session.close()
+      throw error
     }
-    const waitStarted = new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("Live connection timed out")), 8000)
-      const trySend = () => {
-        if (socket.readyState === OPEN) {
-          send(
-            sessionStartPayload({
-              model: options.model,
-              voice: options.voice,
-              instructions: options.instructions,
-              backendModel: options.backendModel,
-            }),
-          )
-        }
-      }
-      const onMessage = (raw: unknown) => {
-        const text = typeof raw === "string" ? raw : Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw)
-        let event: LiveEvent
-        try {
-          event = JSON.parse(text) as LiveEvent
-        } catch {
-          return
-        }
-        if (event.type === "session.started") {
-          clearTimeout(timer)
-          resolve()
-        }
-        if (event.type === "error") {
-          const error = event.error as { message?: string } | undefined
-          clearTimeout(timer)
-          reject(new Error(error?.message ?? "Live error"))
-        }
-      }
-      socket.on?.("message", onMessage)
-      socket.addEventListener?.("message", (event) => onMessage(event.data))
-      trySend()
-      socket.on?.("open", trySend)
-      socket.addEventListener?.("open", () => trySend())
-    })
-    await waitStarted
-    return session
   }
   return start()
 }

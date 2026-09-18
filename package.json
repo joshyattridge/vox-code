@@ -5,11 +5,11 @@
   "type": "module",
   "license": "MIT",
   "bin": {
-    "vox-code": "./scripts/install.mjs"
+    "vox-code": "scripts/install.mjs"
   },
   "engines": {
     "opencode": ">=1.18.29",
-    "node": ">=20"
+    "node": ">=22.6.0"
   },
   "main": "./src/index.ts",
   "exports": {
@@ -32,6 +32,7 @@
   "files": [
     "src",
     "scripts",
+    "docs",
     "README.md"
   ],
   "repository": {
@@ -53,16 +54,27 @@
   ],
   "scripts": {
     "install-plugin": "node ./scripts/install.mjs",
-    "test": "node --experimental-strip-types --test test/audio.test.ts test/auth.test.ts test/daemon.test.ts test/focus.test.ts test/install.test.ts test/live.test.ts test/paths.test.ts test/persist.test.ts test/protocol.test.ts test/realtime.test.ts test/status.test.ts test/supervisor.test.ts test/tools.test.ts test/tui-config.test.ts test/voices.test.ts",
+    "test": "node --experimental-strip-types --import ./test/setup.mjs --test test/*.test.ts",
+    "test:e2e": "node --experimental-strip-types --import ./test/setup.mjs --test test/e2e/*.test.ts",
+    "test:all": "npm test && npm run test:e2e && npm run typecheck",
+    "test:realtime-smoke": "node --experimental-strip-types --import ./test/setup.mjs --test test/realtime-smoke.test.ts",
+    "test:live-smoke": "node --experimental-strip-types --import ./test/setup.mjs --test test/realtime-smoke.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "ws": "^8.18.3"
   },
+  "overrides": {
+    "@babel/core": "7.29.7"
+  },
   "devDependencies": {
-    "@opencode-ai/plugin": ">=1.18.29",
+    "@opencode-ai/plugin": "1.18.31",
+    "@opentui/core": "0.4.5",
+    "@opentui/keymap": "0.4.5",
+    "@opentui/solid": "0.4.5",
     "@types/node": "^24.3.0",
     "@types/ws": "^8.18.1",
+    "solid-js": "1.9.12",
     "typescript": "^5.8.2"
   },
   "peerDependencies": {

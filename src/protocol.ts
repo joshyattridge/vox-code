@@ -5,7 +5,7 @@ export type ClientConfig = {
   headers?: Record<string, string>
 }
 
-export const VOICE_PROTOCOL = 7
+export const VOICE_PROTOCOL = 14
 
 export type UpMessage =
   | { type: "hello"; directory?: string; options?: Record<string, unknown>; client?: ClientConfig; sessionId?: string }
@@ -15,6 +15,8 @@ export type UpMessage =
   | { type: "setModel"; model: string }
   | { type: "setVoice"; voice: string }
   | { type: "setInstructions"; instructions?: string }
+  | { type: "setApiKey"; apiKey: string }
+  | { type: "removeApiKey" }
   | { type: "previewVoice"; voice: string }
   | { type: "idle"; sessionId: string }
   | { type: "sessionError"; sessionId: string; message: string }

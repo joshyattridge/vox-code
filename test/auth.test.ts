@@ -1,55 +1,87 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { mkdtempSync, writeFileSync } from "node:fs"
+import { mkdtempSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { resolveOpenAiApiKey } from "../src/auth.ts"
+import {
+  readVoiceApiKey,
+  removeVoiceApiKey,
+  resolveOpenAiApiKey,
+  saveVoiceApiKey,
+  validateOpenAiApiKey,
+} from "../src/auth.ts"
 
-test("reads the OpenAI API key from OpenCode auth.json", () => {
+test("saves and resolves a Voice-only API key with private permissions", () => {
   const dir = mkdtempSync(join(tmpdir(), "voice-auth-"))
-  const authFile = join(dir, "auth.json")
-  writeFileSync(
-    authFile,
-    JSON.stringify({ openai: { type: "api", key: "sk-from-opencode" } }),
-  )
+  const voiceKeyFile = join(dir, "vox", "credentials.json")
+  saveVoiceApiKey(" sk-vox ", voiceKeyFile)
   const resolved = resolveOpenAiApiKey({
     env: {},
-    authFile,
+    voiceKeyFile,
   })
-  assert.equal(resolved.key, "sk-from-opencode")
-  assert.equal(resolved.source, "opencode-auth")
+  assert.equal(readVoiceApiKey(voiceKeyFile), "sk-vox")
+  assert.equal(resolved.key, "sk-vox")
+  assert.equal(resolved.source, "file")
+  assert.equal(statSync(voiceKeyFile).mode & 0o777, 0o600)
 })
 
-test("plugin option overrides OpenCode auth", () => {
+test("Voice key overrides legacy plugin and environment configuration", () => {
   const dir = mkdtempSync(join(tmpdir(), "voice-auth-"))
-  const authFile = join(dir, "auth.json")
-  writeFileSync(authFile, JSON.stringify({ openai: { type: "api", key: "sk-stored" } }))
+  const voiceKeyFile = join(dir, "credentials.json")
+  saveVoiceApiKey("sk-vox", voiceKeyFile)
   const resolved = resolveOpenAiApiKey({
     pluginKey: "sk-option",
     env: { OPENAI_API_KEY: "sk-env" },
-    authFile,
+    voiceKeyFile,
   })
-  assert.equal(resolved.key, "sk-option")
-  assert.equal(resolved.source, "plugin")
+  assert.equal(resolved.key, "sk-vox")
+  assert.equal(resolved.source, "file")
 })
 
-test("falls back to OPENAI_API_KEY when auth.json has no api key", () => {
+test("falls back to the legacy plugin option and environment", () => {
   const dir = mkdtempSync(join(tmpdir(), "voice-auth-"))
-  const authFile = join(dir, "auth.json")
-  writeFileSync(authFile, JSON.stringify({ openai: { type: "oauth", access: "tok" } }))
-  const resolved = resolveOpenAiApiKey({
+  const voiceKeyFile = join(dir, "missing.json")
+  const plugin = resolveOpenAiApiKey({
+    pluginKey: "sk-option",
     env: { OPENAI_API_KEY: "sk-env" },
-    authFile,
+    voiceKeyFile,
   })
-  assert.equal(resolved.key, "sk-env")
-  assert.equal(resolved.source, "env")
+  const env = resolveOpenAiApiKey({ env: { OPENAI_API_KEY: "sk-env" }, voiceKeyFile })
+  assert.equal(plugin.source, "plugin")
+  assert.equal(env.source, "env")
 })
 
-test("explains that ChatGPT OAuth cannot power Realtime", () => {
+test("missing key points to the Voice command rather than OpenCode auth", () => {
   const dir = mkdtempSync(join(tmpdir(), "voice-auth-"))
-  const authFile = join(dir, "auth.json")
-  writeFileSync(authFile, JSON.stringify({ openai: { type: "oauth", access: "tok" } }))
-  const resolved = resolveOpenAiApiKey({ env: {}, authFile })
+  const resolved = resolveOpenAiApiKey({ env: {}, voiceKeyFile: join(dir, "missing.json") })
   assert.equal(resolved.source, "missing")
-  assert.match(resolved.hint, /OAuth/)
+  assert.match(resolved.hint, /\/voice-key/)
+  assert.doesNotMatch(resolved.hint, /opencode auth login/)
+})
+
+test("removes a saved private-file key", () => {
+  const dir = mkdtempSync(join(tmpdir(), "voice-auth-"))
+  const voiceKeyFile = join(dir, "credentials.json")
+  saveVoiceApiKey("sk-abcdefghijklmnopqrstuvwxyz", voiceKeyFile)
+  assert.equal(removeVoiceApiKey(voiceKeyFile), true)
+  assert.equal(readVoiceApiKey(voiceKeyFile), undefined)
+  assert.equal(removeVoiceApiKey(voiceKeyFile), false)
+})
+
+test("validates an API key before storage", async () => {
+  const calls: string[] = []
+  await validateOpenAiApiKey("sk-abcdefghijklmnopqrstuvwxyz", async (url, init) => {
+    calls.push(String(url), String((init?.headers as Record<string, string>).Authorization))
+    return new Response("{}", { status: 200 })
+  })
+  assert.equal(calls[0], "https://api.openai.com/v1/models")
+  assert.match(calls[1] ?? "", /^Bearer sk-/)
+
+  await assert.rejects(
+    validateOpenAiApiKey(
+      "sk-abcdefghijklmnopqrstuvwxyz",
+      async () => new Response(JSON.stringify({ error: { message: "Invalid key" } }), { status: 401 }),
+    ),
+    /Invalid key/,
+  )
 })

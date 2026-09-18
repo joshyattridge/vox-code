@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { unlinkSync } from "node:fs"
+import { existsSync, unlinkSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { basename, join } from "node:path"
 import { test } from "node:test"
@@ -8,8 +8,9 @@ import type { SessionClient } from "../src/client.ts"
 import { listenVoiceDaemon } from "../src/daemon.ts"
 import type { VoiceSupervisor } from "../src/supervisor.ts"
 import { chipLabel, initialVoiceState, type VoiceUiState } from "../src/types.ts"
+import { until } from "./helpers.ts"
 
-function fakeSupervisor(): VoiceSupervisor {
+function fakeSupervisor(savedKeys?: string[]): VoiceSupervisor {
   let state: VoiceUiState = initialVoiceState()
   let model = "gpt-realtime"
   let voice = "marin"
@@ -19,7 +20,7 @@ function fakeSupervisor(): VoiceSupervisor {
     for (const listener of listeners) listener()
   }
   const start = async () => {
-    state = { ...state, phase: "connected", realtimeConnected: true }
+    state = { ...state, phase: "connected", realtimeConnected: true, desiredOn: true }
     notify()
   }
   const stop = async () => {
@@ -54,6 +55,10 @@ function fakeSupervisor(): VoiceSupervisor {
       instructions = next?.trim() || undefined
       notify()
     },
+    async setApiKey(apiKey) {
+      savedKeys?.push(apiKey)
+    },
+    async removeApiKey() {},
     async previewVoice() {},
     statusText: () => `phase: ${state.phase}`,
     handleIdle() {},
@@ -73,8 +78,10 @@ test("TUI disconnect leaves the background voice daemon running", async () => {
   const sockPath = join(tmpdir(), `vox-voice-${id}.sock`)
   const pidPath = join(tmpdir(), `vox-voice-${id}.pid`)
   const inner = fakeSupervisor()
+  const savedKeys: string[] = []
   const focused: Array<{ sessionId: string; directory?: string }> = []
   let focusFromDaemon: ((sessionId: string, directory?: string) => boolean | Promise<boolean>) | undefined
+  let currentContextFromDaemon: (() => Promise<unknown>) | undefined
 
   const daemon = await listenVoiceDaemon({
     sockPath,
@@ -82,7 +89,13 @@ test("TUI disconnect leaves the background voice daemon running", async () => {
     idleExitMs: 60_000,
     createSupervisor: (input) => {
       focusFromDaemon = input.focusSession
-      return inner
+      currentContextFromDaemon = input.currentContext
+      return {
+        ...inner,
+        setApiKey: async (apiKey) => {
+          savedKeys.push(apiKey)
+        },
+      }
     },
   })
 
@@ -92,6 +105,7 @@ test("TUI disconnect leaves the background voice daemon running", async () => {
       pidPath,
       options: { model: "gpt-live-1" },
       hooks: {
+        currentContext: () => ({ route: { name: "session", sessionID: "ses_current" } }),
         focusSession: async (sessionId, directory) => {
           focused.push({ sessionId, directory })
           return true
@@ -108,10 +122,17 @@ test("TUI disconnect leaves the background voice daemon running", async () => {
     await bridge.setInstructions("Talk like a calm coach.")
     assert.match(bridge.instructions() ?? "", /calm coach/)
     assert.match(inner.instructions() ?? "", /calm coach/)
+    await bridge.setApiKey("sk-vox-only")
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    assert.deepEqual(savedKeys, ["sk-vox-only"])
 
     await focusFromDaemon?.("ses_worker", "/tmp/mario-game")
     await new Promise((resolve) => setTimeout(resolve, 30))
     assert.deepEqual(focused, [{ sessionId: "ses_worker", directory: "/tmp/mario-game" }])
+
+    assert.deepEqual(await currentContextFromDaemon?.(), {
+      route: { name: "session", sessionID: "ses_current" },
+    })
 
     await bridge.dispose()
     await new Promise((resolve) => setTimeout(resolve, 30))
@@ -149,6 +170,48 @@ test("daemon spawn uses Node or Bun, not the OpenCode CLI", () => {
   const spawned = daemonSpawnArgs("/tmp/daemon.ts", runtime)
   assert.equal(spawned.cmd, runtime.cmd)
   assert.ok(spawned.args.some((arg) => arg.endsWith("daemon.ts")))
+})
+
+test("daemon stops voice after OpenCode remains disconnected", async () => {
+  const id = `${process.pid}-${Date.now()}-exit`
+  const sockPath = join(tmpdir(), `vox-voice-${id}.sock`)
+  const pidPath = join(tmpdir(), `vox-voice-${id}.pid`)
+  const daemon = await listenVoiceDaemon({
+    sockPath,
+    pidPath,
+    idleExitMs: 25,
+    createSupervisor: () => fakeSupervisor(),
+  })
+  try {
+    const bridge = await attachVoiceDaemon({ sockPath, pidPath, options: { autoStopOnOpenCodeExit: true } })
+    await bridge.start()
+    await bridge.dispose()
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    assert.equal(existsSync(sockPath), false)
+  } finally {
+    await daemon.close()
+  }
+})
+
+test("daemon can keep voice alive after OpenCode exits when configured", async () => {
+  const id = `${process.pid}-${Date.now()}-keep`
+  const sockPath = join(tmpdir(), `vox-voice-${id}.sock`)
+  const pidPath = join(tmpdir(), `vox-voice-${id}.pid`)
+  const daemon = await listenVoiceDaemon({
+    sockPath,
+    pidPath,
+    idleExitMs: 25,
+    createSupervisor: () => fakeSupervisor(),
+  })
+  try {
+    const bridge = await attachVoiceDaemon({ sockPath, pidPath, options: { autoStopOnOpenCodeExit: false } })
+    await bridge.start()
+    await bridge.dispose()
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    assert.equal(existsSync(sockPath), true)
+  } finally {
+    await daemon.close()
+  }
 })
 
 test("daemon session tools RPC through the TUI OpenCode client", async () => {
@@ -207,4 +270,51 @@ test("daemon session tools RPC through the TUI OpenCode client", async () => {
       // already removed
     }
   }
+})
+
+test("RPC replies bypass a command waiting for TUI context", { timeout: 5000 }, async () => {
+  const id = `${process.pid}-${Date.now()}-queue`
+  const sockPath = join(tmpdir(), `vox-${id}.sock`)
+  const pidPath = join(tmpdir(), `vox-${id}.pid`)
+  let context: unknown
+  const daemon = await listenVoiceDaemon({ sockPath, pidPath, createSupervisor: (input) => {
+    const inner = fakeSupervisor()
+    return { ...inner, start: async () => {
+      context = await input.currentContext()
+      await inner.start()
+    } }
+  } })
+  try {
+    const bridge = await attachVoiceDaemon({ sockPath, pidPath, hooks: { currentContext: () => ({ route: "home" }) } })
+    await bridge.start()
+    assert.deepEqual(context, { route: "home" })
+    assert.equal(bridge.state().phase, "connected")
+    await bridge.dispose()
+  } finally { await daemon.close() }
+})
+
+test("switching between TUI clients restores each client's session and directory", async () => {
+  const id = `${process.pid}-${Date.now()}-contexts`
+  const sockPath = join(tmpdir(), `vox-${id}.sock`)
+  const pidPath = join(tmpdir(), `vox-${id}.pid`)
+  let readDirectory!: () => string | undefined
+  let readSession!: () => string | undefined
+  const daemon = await listenVoiceDaemon({ sockPath, pidPath, createSupervisor: (input) => {
+    readDirectory = input.directory
+    readSession = input.currentSessionId
+    return fakeSupervisor()
+  } })
+  try {
+    const a = await attachVoiceDaemon({ sockPath, pidPath, directory: "/project/a", sessionId: "ses_a" })
+    const b = await attachVoiceDaemon({ sockPath, pidPath, directory: "/project/b" })
+    assert.equal(readDirectory(), "/project/b")
+    assert.equal(readSession(), undefined)
+    a.setCurrentSession("ses_a")
+    await until(() => readSession() === "ses_a")
+    assert.equal(readDirectory(), "/project/a")
+    await a.dispose()
+    await until(() => readDirectory() === "/project/b")
+    assert.equal(readSession(), undefined)
+    await b.dispose()
+  } finally { await daemon.close() }
 })

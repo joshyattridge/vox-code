@@ -11,10 +11,11 @@ export type AudioIO = {
   stopCapture: () => Promise<void>
   startPlayback: () => Promise<void>
   play: (pcm: Buffer) => Promise<void>
-  drainPlayback: () => Promise<void>
+  drainPlayback: (finalize?: boolean) => Promise<void>
   stopPlayback: () => Promise<void>
   restartPlayback: () => Promise<void>
   dispose: () => Promise<void>
+  setErrorHandler?: (handler: (error: Error) => void) => void
 }
 
 export class AudioError extends Error {
@@ -26,9 +27,12 @@ export class AudioError extends Error {
 
 export const FRAME_MS = 20
 export const FRAME_BYTES = (SAMPLE_RATE * 2 * FRAME_MS) / 1000
-export const PREROLL_MS = 0
+// WebSocket audio has no media-layer jitter buffer. A small preroll smooths
+// packet jitter without making every response feel delayed.
+export const PREROLL_MS = 160
 export const PREROLL_BYTES = (SAMPLE_RATE * 2 * PREROLL_MS) / 1000
 export const UNDERRUN_GAP_MS = 800
+const PREROLL_WAIT_MS = PREROLL_MS
 
 const EXTRA_BIN_DIRS = ["/opt/homebrew/bin", "/usr/local/bin"]
 
@@ -66,6 +70,9 @@ export class PcmWritePump {
 
   push(pcm: Buffer): Buffer | undefined {
     if (!pcm.length) return
+    // Re-arm after a real delivery gap so a later turn or resumed stream gets
+    // jitter protection instead of being written one packet at a time.
+    this.markQuiet()
     this.#chunks.push(pcm)
     this.queuedBytes += pcm.length
     this.#lastPush = this.now()
@@ -129,10 +136,12 @@ export function ffplayArgs() {
 }
 
 export function soxPlayArgs() {
-  return ["-q", "-t", "raw", "-r", String(SAMPLE_RATE), "-e", "signed", "-b", "16", "-c", "1", "-"]
+  // On macOS Node's child stdin is a socket; fstat can report the currently
+  // buffered bytes as its size. SoX must read until EOF, not that first size.
+  return ["-q", "--ignore-length", "-t", "raw", "-r", String(SAMPLE_RATE), "-e", "signed", "-b", "16", "-c", "1", "-"]
 }
 
-class StdinPcmPlayer {
+export class StdinPcmPlayer {
   #player?: ChildProcessWithoutNullStreams
   #running = false
   #ready = false
@@ -140,29 +149,72 @@ class StdinPcmPlayer {
   #held: Buffer[] = []
   #command: () => string
   #args: string[]
-  restarts = 0
+  #failure?: Error
+  #starting?: Promise<void>
+  #finishing?: ChildProcessWithoutNullStreams
+  #endsAt = 0
+  #spawnProcess: typeof spawnStdio
+  onError?: (error: Error) => void
 
-  constructor(command: () => string, args: string[]) {
+  constructor(command: () => string, args: string[], spawnProcess = spawnStdio) {
     this.#command = command
     this.#args = args
+    this.#spawnProcess = spawnProcess
   }
 
   start() {
-    if (this.#running && this.#player && !this.#player.killed) return
+    if (this.#starting) return this.#starting
+    if (this.#running && this.#ready) return Promise.resolve()
     this.#running = true
-    this.#spawn()
+    this.#failure = undefined
+    const starting = this.#spawn()
+    this.#starting = starting
+    void starting.finally(() => {
+      if (this.#starting === starting) this.#starting = undefined
+    }).catch(() => undefined)
+    return starting
   }
 
   push(pcm: Buffer) {
     if (!pcm.length) return
-    if (!this.#running) this.start()
+    if (this.#failure) throw this.#failure
+    if (!this.#running) throw new AudioError("Speaker playback is not started")
+    const queued = this.#held.reduce((sum, chunk) => sum + chunk.length, 0)
+    if (queued + pcm.length > SAMPLE_RATE * 2 * 30) {
+      throw new AudioError("Speaker playback stalled: audio queue exceeded 30 seconds")
+    }
     this.#write(pcm)
   }
 
-  async drain() {
-    const deadline = Date.now() + 1500
-    while (Date.now() < deadline && (this.#corked || this.#held.length > 0)) {
+  async drain(finalize = false) {
+    const player = this.#player
+    const deadline = Date.now() + 35_000
+    while (this.#running && player === this.#player && (this.#corked || this.#held.length > 0 || (!finalize && Date.now() < this.#endsAt))) {
+      if (Date.now() >= deadline) throw new AudioError("Speaker playback drain timed out")
       await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    if (this.#failure) throw this.#failure
+    if (finalize && player && player === this.#player && this.#running) {
+      this.#finishing = player
+      this.#ready = false
+      const exited = new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new AudioError("Speaker playback finalization timed out")), 35_000)
+        player.once("exit", (code, signal) => {
+          clearTimeout(timer)
+          if (code === 0 && !signal) resolve()
+          else reject(new AudioError(`Speaker process exited while finalizing (${signal ?? code})`))
+        })
+        player.once("error", (error) => {
+          clearTimeout(timer)
+          reject(error)
+        })
+      })
+      player.stdin.end()
+      try {
+        await exited
+      } finally {
+        if (this.#finishing === player) this.#finishing = undefined
+      }
     }
     await new Promise((resolve) => setTimeout(resolve, 80))
   }
@@ -172,6 +224,9 @@ class StdinPcmPlayer {
     this.#ready = false
     this.#corked = false
     this.#held = []
+    this.#endsAt = 0
+    this.#starting = undefined
+    this.#finishing = undefined
     const player = this.#player
     this.#player = undefined
     if (!player) return
@@ -191,40 +246,50 @@ class StdinPcmPlayer {
     killer.unref?.()
   }
 
-  #spawn() {
-    if (this.#player && !this.#player.killed) return
+  #spawn(): Promise<void> {
     const bin = this.#command()
     this.#ready = false
-    const child = spawnStdio(bin, this.#args)
+    const child = this.#spawnProcess(bin, this.#args)
     this.#player = child
     voiceLog("player start", { bin, args: this.#args.join(" ") })
-    child.once("spawn", () => {
-      if (this.#player !== child) return
-      this.#ready = true
-      this.#flushHeld()
-    })
-    child.stdin.on("error", (error) => {
-      voiceLog("player stdin error", error.message)
-      if (this.#player === child) this.#ready = false
-    })
+    let stderr = ""
     child.stderr?.on("data", (chunk: string) => {
       const text = chunk.trim()
+      stderr = (stderr + text).slice(-400)
       if (text) voiceLog("player stderr", text.slice(0, 400))
     })
-    child.on("exit", (code, signal) => {
-      if (this.#player === child) {
-        this.#player = undefined
-        this.#ready = false
+    return new Promise<void>((resolve, reject) => {
+      const fail = (error: Error) => {
+        reject(error)
+        if (this.#player !== child || !this.#running) return
+        this.#failure = error
+        this.stop()
+        this.onError?.(error)
       }
-      if (!this.#running || this.#player) return
-      if (code === 0 && !signal) {
-        this.#running = false
-        voiceLog("player ended", { name: bin, code })
-        return
-      }
-      this.restarts += 1
-      voiceLog("player restart", { name: bin, code, signal, restarts: this.restarts })
-      this.#spawn()
+      child.once("spawn", () => {
+        if (this.#player !== child || !this.#running) {
+          reject(new AudioError("Speaker startup cancelled"))
+          return
+        }
+        this.#ready = true
+        this.#flushHeld()
+        resolve()
+      })
+      child.on("error", fail)
+      child.stdin.on("error", (error) => {
+        if (this.#finishing !== child) fail(error)
+      })
+      child.on("exit", (code, signal) => {
+        if (this.#finishing === child) {
+          if (this.#player === child) this.#player = undefined
+          this.#running = false
+          this.#ready = false
+          this.#corked = false
+          this.#endsAt = 0
+          return
+        }
+        fail(new AudioError(`Speaker process exited (${signal ?? code}): ${stderr || bin}`))
+      })
     })
   }
 
@@ -235,8 +300,7 @@ class StdinPcmPlayer {
   }
 
   #write(buf: Buffer) {
-    if (!this.#player || this.#player.killed) this.#spawn()
-    if (!this.#player) return
+    if (!this.#running || !this.#player) return
     if (!this.#ready || this.#corked) {
       this.#held.push(buf)
       return
@@ -245,16 +309,14 @@ class StdinPcmPlayer {
     try {
       ok = this.#player.stdin.write(buf)
     } catch (error) {
-      voiceLog("player write failed", error instanceof Error ? error.message : String(error))
-      this.#player = undefined
-      this.#ready = false
-      if (this.#running) this.#spawn()
-      return
+      throw new AudioError(`Speaker write failed: ${error instanceof Error ? error.message : String(error)}`)
     }
+    this.#endsAt = Math.max(Date.now(), this.#endsAt) + pcmDurationMs(buf)
     if (ok) return
     this.#corked = true
     const player = this.#player
     player.stdin.once("drain", () => {
+      if (this.#player !== player || !this.#running) return
       this.#corked = false
       this.#flushHeld()
     })
@@ -265,9 +327,13 @@ class PipedAudio implements AudioIO {
   readonly name: string
   #capture?: ChildProcessWithoutNullStreams
   #playback: StdinPcmPlayer
+  #pump = new PcmWritePump()
+  #prerollTimer?: ReturnType<typeof setTimeout>
   #recBin: () => string
   #recArgs: string[]
   #played = 0
+  #onError?: (error: Error) => void
+  #draining?: Promise<void>
 
   constructor(
     name: string,
@@ -283,9 +349,26 @@ class PipedAudio implements AudioIO {
   }
 
   async startCapture(onChunk: AudioHandler) {
-    this.#capture = spawnStdio(this.#recBin(), this.#recArgs)
-    this.#capture.stdout.on("data", (chunk: Buffer) => onChunk(chunk))
-    this.#capture.on("error", () => undefined)
+    if (this.#capture) return
+    const child = spawnStdio(this.#recBin(), this.#recArgs)
+    this.#capture = child
+    let stderr = ""
+    child.stderr.on("data", (chunk: string) => { stderr = (stderr + chunk).slice(-400) })
+    child.stdout.on("data", (chunk: Buffer) => {
+      if (this.#capture === child) onChunk(chunk)
+    })
+    await new Promise<void>((resolve, reject) => {
+      const fail = (error: Error) => {
+        reject(error)
+        if (this.#capture !== child) return
+        this.#capture = undefined
+        child.kill("SIGTERM")
+        this.#onError?.(error)
+      }
+      child.once("spawn", resolve)
+      child.on("error", fail)
+      child.on("exit", (code, signal) => fail(new AudioError(`Microphone process exited (${signal ?? code}): ${stderr || this.#recBin()}`)))
+    })
   }
 
   async stopCapture() {
@@ -294,23 +377,53 @@ class PipedAudio implements AudioIO {
   }
 
   async startPlayback() {
-    this.#playback.start()
+    await this.#playback.start()
+  }
+
+  setErrorHandler(handler: (error: Error) => void) {
+    this.#onError = handler
+    this.#playback.onError = handler
   }
 
   async play(pcm: Buffer) {
+    await this.#draining
     this.#played += 1
     if (this.#played <= 3 || this.#played % 40 === 0) {
       voiceLog("play pcm", { n: this.#played, bytes: pcm.length, rms: Math.round(pcmRms(pcm)) })
     }
-    this.#playback.push(pcm)
+    const flushed = this.#pump.push(pcm)
+    if (flushed) {
+      this.#clearPrerollTimer()
+      await this.#playback.start()
+      this.#playback.push(flushed)
+      return
+    }
+    this.#schedulePrerollFlush()
   }
 
-  async drainPlayback() {
-    await this.#playback.drain()
+  async drainPlayback(finalize = false) {
+    if (this.#draining) return this.#draining
+    const draining = (async () => {
+      this.#clearPrerollTimer()
+      const held = this.#pump.flushHeld()
+      if (held) {
+        await this.#playback.start()
+        this.#playback.push(held)
+      }
+      await this.#playback.drain(finalize)
+    })()
+    this.#draining = draining
+    try {
+      await draining
+    } finally {
+      if (this.#draining === draining) this.#draining = undefined
+    }
   }
 
   async stopPlayback() {
     this.#played = 0
+    this.#clearPrerollTimer()
+    this.#pump.reset()
     this.#playback.stop()
   }
 
@@ -322,6 +435,33 @@ class PipedAudio implements AudioIO {
   async dispose() {
     await this.stopCapture()
     await this.stopPlayback()
+  }
+
+  #schedulePrerollFlush() {
+    this.#clearPrerollTimer()
+    this.#prerollTimer = setTimeout(async () => {
+      this.#prerollTimer = undefined
+      const held = this.#pump.flushIfWaited(PREROLL_WAIT_MS)
+      if (held) {
+        voiceLog("playback preroll timeout", { bytes: held.length })
+        try {
+          await this.#draining
+          await this.#playback.start()
+          this.#playback.push(held)
+        } catch (error) {
+          const failure = error instanceof Error ? error : new Error(String(error))
+          voiceLog("playback preroll failed", failure.message)
+          this.#onError?.(failure)
+        }
+      }
+    }, PREROLL_WAIT_MS)
+    this.#prerollTimer.unref?.()
+  }
+
+  #clearPrerollTimer() {
+    if (!this.#prerollTimer) return
+    clearTimeout(this.#prerollTimer)
+    this.#prerollTimer = undefined
   }
 }
 
@@ -444,7 +584,7 @@ export async function playPcmClip(pcm: Buffer): Promise<void> {
       else resolve()
     }
     child.once("error", (error) => done(error instanceof Error ? error : new Error(String(error))))
-    child.once("exit", () => done())
+    child.once("exit", (code, signal) => done(code === 0 && !signal ? undefined : new AudioError(`Voice sample playback failed (${signal ?? code})`)))
     child.stdin.once("error", () => {
       // sox/ffplay may close stdin after the clip; ignore EPIPE
     })

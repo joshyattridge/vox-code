@@ -7,6 +7,25 @@ import { createSessionController, lastAssistantText } from "../src/sessions.ts"
 import { executeTool, parseToolArgs } from "../src/tools.ts"
 import type { SessionClient, SessionInfo } from "../src/client.ts"
 
+test("current_context returns the bounded TUI snapshot", async () => {
+  const sessions = createSessionController(mockClient(), () => "/repo")
+  const snapshot = { route: { name: "session", sessionID: "ses_1" } }
+  const result = await executeTool("current_context", {}, sessions, {
+    currentContext: async () => snapshot,
+  })
+  assert.deepEqual(result.output, snapshot)
+})
+
+test("a failed status lookup cannot announce a worker as completed", async () => {
+  const client = mockClient([{ id: "ses_1", title: "worker" }])
+  client.session.status = async () => ({ error: { message: "server unavailable" } })
+  const sessions = createSessionController(client)
+  const status = await sessions.status("ses_1")
+  assert.equal(status.status, "unknown")
+  assert.equal(status.complete, false)
+  assert.equal((await sessions.list())[0].status, "unknown")
+})
+
 function mockClient(seed: SessionInfo[] = []): SessionClient & { prompts: Array<{ id: string; text: string }> } {
   const sessions = [...seed]
   const statuses: Record<string, { type: string }> = {}

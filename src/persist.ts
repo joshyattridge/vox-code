@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
+import { mkdirSync, readFileSync, renameSync, writeFileSync, rmSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import { chipLabel, initialVoiceState, normalizeVoiceState, type VoiceUiState } from "./types.ts"
@@ -6,14 +6,15 @@ import { chipLabel, initialVoiceState, normalizeVoiceState, type VoiceUiState } 
 export type PersistedVoiceState = VoiceUiState & {
   chip: string
   updatedAt: number
+  ownerPid?: number
 }
 
 export function stateFilePath(): string {
-  return join(homedir(), ".local/share/opencode/vox-code/state.json")
+  return join(process.env.XDG_DATA_HOME?.trim() || join(homedir(), ".local/share"), "opencode/vox-code/state.json")
 }
 
 export function daemonSockPath() {
-  return process.env.VOX_SOCK ?? process.env.VOICE_SOCK ?? stateFilePath().replace(/state\.json$/, "vox.sock")
+  return process.env.VOICE_SOCK ?? stateFilePath().replace(/state\.json$/, "vox.sock")
 }
 
 export function daemonPidPath() {
@@ -22,19 +23,36 @@ export function daemonPidPath() {
 
 export function persistVoiceState(state: VoiceUiState): void {
   const file = stateFilePath()
-  mkdirSync(dirname(file), { recursive: true })
   const normalized = normalizeVoiceState(state)
   const payload: PersistedVoiceState = {
     ...normalized,
     chip: chipLabel(normalized),
     updatedAt: Date.now(),
+    ownerPid: process.pid,
   }
-  writeFileSync(file, `${JSON.stringify(payload, null, 2)}\n`)
+  const temporary = `${file}.${process.pid}.tmp`
+  try {
+    mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
+    writeFileSync(temporary, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 })
+    renameSync(temporary, file)
+  } catch {
+    // Diagnostics must never take down the audio session (e.g. a full disk).
+  } finally {
+    try { rmSync(temporary, { force: true }) } catch { /* best effort */ }
+  }
 }
 
 export function readPersistedVoiceState(): PersistedVoiceState {
   try {
     const parsed = JSON.parse(readFileSync(stateFilePath(), "utf8")) as Partial<PersistedVoiceState>
+    if (parsed.ownerPid) {
+      try { process.kill(parsed.ownerPid, 0) } catch {
+        parsed.realtimeConnected = false
+        parsed.desiredOn = false
+        parsed.phase = "off"
+        parsed.connectedSince = undefined
+      }
+    }
     const base = initialVoiceState()
     const normalized = normalizeVoiceState({
       ...base,

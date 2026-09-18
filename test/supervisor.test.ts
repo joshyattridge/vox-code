@@ -1,9 +1,16 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { MemoryAudio } from "../src/audio.ts"
-import { createVoiceSupervisor } from "../src/supervisor.ts"
+import { createVoiceSupervisor as createSupervisor } from "../src/supervisor.ts"
 import type { SessionClient } from "../src/client.ts"
 import type { RealtimeSession } from "../src/realtime.ts"
+import type { RealtimeHandlers } from "../src/realtime.ts"
+import { deferred, tick, until } from "./helpers.ts"
+
+const createVoiceSupervisor = (input: Parameters<typeof createSupervisor>[0]) => createSupervisor({
+  resolveKey: () => ({ key: "sk-test", source: "plugin", hint: "test" }),
+  ...input,
+})
 
 const client: SessionClient = {
   session: {
@@ -66,11 +73,11 @@ test("toggle starts when a key and fake realtime session exist", async () => {
   })
   await supervisor.start()
   assert.equal(supervisor.state().phase, "connected")
-  assert.equal(supervisor.chip(), "● VOX")
+  assert.equal(supervisor.chip(), "● VOICE")
   assert.equal(audio.capturing, true)
   await supervisor.stop()
   assert.equal(closed, true)
-  assert.equal(supervisor.chip(), "○ vox")
+  assert.equal(supervisor.chip(), "○ voice")
 })
 
 test("holds the microphone while a realtime model is speaking", async () => {
@@ -132,7 +139,7 @@ test("realtime speech during playback does not unmute the mic", async () => {
   await supervisor.stop()
 })
 
-test("unexpected socket close toasts and returns to off", async () => {
+test("unexpected socket close enters reconnecting state", async () => {
   const toasts: string[] = []
   let onClose: ((reason: string) => void) | undefined
   const supervisor = createVoiceSupervisor({
@@ -148,8 +155,96 @@ test("unexpected socket close toasts and returns to off", async () => {
   await supervisor.start()
   onClose?.("closed")
   await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(supervisor.state().phase, "reconnecting")
+  assert.equal(supervisor.state().desiredOn, true)
+  assert.match(toasts.join(" "), /Reconnecting/)
+  await supervisor.stop()
+})
+
+test("transient disconnect automatically reconnects", async () => {
+  let connects = 0
+  let onClose: ((reason: string) => void) | undefined
+  const supervisor = createVoiceSupervisor({
+    client,
+    options: { apiKey: "sk-test" },
+    audio: new MemoryAudio(),
+    connect: async (options) => {
+      connects += 1
+      onClose = options.handlers.onClose
+      return { sendAudio() {}, injectText() {}, close() {} }
+    },
+  })
+  await supervisor.start()
+  onClose?.("network changed")
+  await new Promise((resolve) => setTimeout(resolve, 1300))
+  assert.equal(connects, 2)
+  assert.equal(supervisor.state().phase, "connected")
+  await supervisor.stop()
+})
+
+test("inactivity timeout automatically stops voice", async () => {
+  const toasts: string[] = []
+  const supervisor = createVoiceSupervisor({
+    client,
+    options: {
+      apiKey: "sk-test",
+      inactivityTimeoutMinutes: 0.0002,
+      costWarningMinutes: 0,
+      maxSessionDurationMinutes: 0,
+    },
+    audio: new MemoryAudio(),
+    connect: async () => ({ sendAudio() {}, injectText() {}, close() {} }),
+    hooks: { toast: ({ message }) => toasts.push(message) },
+  })
+  await supervisor.start()
+  await new Promise((resolve) => setTimeout(resolve, 40))
   assert.equal(supervisor.state().phase, "off")
-  assert.match(toasts.join(" "), /disconnected/)
+  assert.match(toasts.join(" "), /inactivity/)
+})
+
+test("cost warning and maximum duration apply to active time", async () => {
+  const toasts: string[] = []
+  const supervisor = createVoiceSupervisor({
+    client,
+    options: {
+      apiKey: "sk-test",
+      inactivityTimeoutMinutes: 0,
+      costWarningMinutes: 0.00015,
+      maxSessionDurationMinutes: 0.0004,
+    },
+    audio: new MemoryAudio(),
+    connect: async () => ({ sendAudio() {}, injectText() {}, close() {} }),
+    hooks: { toast: ({ message }) => toasts.push(message) },
+  })
+  await supervisor.start()
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  assert.equal(supervisor.state().phase, "off")
+  assert.equal(supervisor.state().costWarningShown, true)
+  assert.match(toasts.join(" "), /billed by OpenAI/)
+  assert.match(toasts.join(" "), /session limit/)
+})
+
+test("API key is validated before it is saved", async () => {
+  const saved: string[] = []
+  const toasts: string[] = []
+  const supervisor = createVoiceSupervisor({
+    client,
+    options: {},
+    audio: new MemoryAudio(),
+    validateKey: async (key) => {
+      if (key === "bad") throw new Error("Invalid key")
+    },
+    saveKey: (key) => {
+      saved.push(key)
+      return "keychain"
+    },
+    hooks: { toast: ({ message }) => toasts.push(message) },
+  })
+  await supervisor.setApiKey("bad")
+  assert.deepEqual(saved, [])
+  await supervisor.setApiKey("sk-valid")
+  assert.deepEqual(saved, ["sk-valid"])
+  assert.match(toasts.join(" "), /validated/)
 })
 
 test("setModel updates the realtime model without starting voice", async () => {
@@ -298,9 +393,9 @@ test("double toggle while connecting only starts once", async () => {
   await Promise.all([supervisor.toggle(), supervisor.toggle(), supervisor.toggle()])
   assert.equal(connects, 1)
   assert.equal(supervisor.state().phase, "connected")
-  assert.equal(supervisor.chip(), "● VOX")
+  assert.equal(supervisor.chip(), "● VOICE")
   await supervisor.stop()
-  assert.equal(supervisor.chip(), "○ vox")
+  assert.equal(supervisor.chip(), "○ voice")
 })
 
 test("audio after stop does not flip the chip back on", async () => {
@@ -316,12 +411,12 @@ test("audio after stop does not flip the chip back on", async () => {
   })
   await supervisor.start()
   onAudioDelta?.(Buffer.from([1, 2]))
-  assert.equal(supervisor.chip(), "● VOX")
+  assert.equal(supervisor.chip(), "● VOICE")
   await supervisor.stop()
   assert.equal(supervisor.state().phase, "off")
   onAudioDelta?.(Buffer.from([3, 4]))
   assert.equal(supervisor.state().phase, "off")
-  assert.equal(supervisor.chip(), "○ vox")
+  assert.equal(supervisor.chip(), "○ voice")
 })
 
 test("live models keep the microphone open while the assistant is speaking", async () => {
@@ -369,4 +464,86 @@ test("idle events inject a spoken update only for owned sessions", async () => {
   supervisor.handleIdle("ses_unknown")
   assert.equal(injected.length, 0)
   await supervisor.stop()
+})
+
+test("an older audio-done callback cannot unmute a newer reply", async (t) => {
+  const audio = new MemoryAudio()
+  let handlers!: RealtimeHandlers
+  let sent = 0
+  const supervisor = createVoiceSupervisor({ client, audio, connect: async (options) => {
+    handlers = options.handlers
+    return { sendAudio() { sent++ }, injectText() {}, close() {} }
+  } })
+  t.after(() => supervisor.dispose())
+  await supervisor.start()
+  handlers.onAudioDelta?.(Buffer.alloc(2))
+  const older = handlers.onAudioDone?.()
+  await tick()
+  handlers.onAudioDelta?.(Buffer.alloc(4800))
+  await older
+  audio.push(Buffer.alloc(2))
+  assert.equal(sent, 0)
+  assert.equal(supervisor.state().phase, "speaking")
+  await handlers.onAudioDone?.()
+  audio.push(Buffer.alloc(2))
+  assert.equal(sent, 1)
+  assert.equal(supervisor.state().phase, "connected")
+})
+
+test("stop cancels pending playback waits and suppresses stale callbacks", async () => {
+  let handlers!: RealtimeHandlers
+  const supervisor = createVoiceSupervisor({ client, audio: new MemoryAudio(), connect: async (options) => {
+    handlers = options.handlers
+    return { sendAudio() {}, injectText() {}, close() {} }
+  } })
+  await supervisor.start()
+  handlers.onAudioDelta?.(Buffer.alloc(48000 * 60))
+  const done = handlers.onAudioDone?.()
+  await supervisor.stop()
+  await done
+  assert.equal(supervisor.state().phase, "off")
+})
+
+test("key resolution failure is recoverable on the next start", async (t) => {
+  let attempts = 0
+  const supervisor = createVoiceSupervisor({ client, audio: new MemoryAudio(), options: { autoReconnect: false },
+    resolveKey: () => {
+      if (++attempts === 1) throw new Error("Key store unavailable")
+      return { key: "test", source: "plugin", hint: "test" }
+    }, connect: async () => ({ sendAudio() {}, injectText() {}, close() {} }),
+  })
+  t.after(() => supervisor.dispose())
+  await supervisor.start()
+  assert.equal(supervisor.state().phase, "error")
+  await supervisor.start()
+  assert.equal(supervisor.state().phase, "connected")
+})
+
+test("stop during capture startup cannot resurrect the connection", async () => {
+  const audio = new MemoryAudio()
+  const capture = deferred()
+  audio.startCapture = () => capture.promise
+  const supervisor = createVoiceSupervisor({ client, audio, connect: async () => ({ sendAudio() {}, injectText() {}, close() {} }) })
+  const opening = supervisor.start()
+  await tick()
+  await supervisor.stop()
+  capture.resolve()
+  await opening
+  assert.equal(supervisor.state().phase, "off")
+  assert.equal(supervisor.state().desiredOn, false)
+})
+
+test("playback failure surfaces instead of producing an unhandled rejection", async (t) => {
+  const audio = new MemoryAudio()
+  audio.play = async () => { throw new Error("speaker disconnected") }
+  let handlers!: RealtimeHandlers
+  const supervisor = createVoiceSupervisor({ client, audio, options: { autoReconnect: false }, connect: async (options) => {
+    handlers = options.handlers
+    return { sendAudio() {}, injectText() {}, close() {} }
+  } })
+  t.after(() => supervisor.dispose())
+  await supervisor.start()
+  handlers.onAudioDelta?.(Buffer.alloc(2))
+  await until(() => supervisor.state().phase === "error")
+  assert.match(supervisor.state().error ?? "", /speaker disconnected/)
 })

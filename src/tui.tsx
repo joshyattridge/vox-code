@@ -1,5 +1,6 @@
 /** @jsxImportSource @opentui/solid */
-import { createSignal, onCleanup } from "solid-js"
+import { createSignal, onCleanup, onMount } from "solid-js"
+import type { InputRenderable } from "@opentui/core"
 import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui"
 import { attachVoiceDaemon } from "./bridge.ts"
 import { focusTuiSession, type TuiFocusApi } from "./focus.ts"
@@ -16,8 +17,10 @@ import {
 } from "./types.ts"
 import { defaultSpokenInstructions } from "./instructions.ts"
 import type { VoiceSupervisor } from "./supervisor.ts"
+import { resolveOpenAiApiKey } from "./auth.ts"
+import { collectCurrentContext } from "./context.ts"
 
-const ID = "vox.code"
+const ID = "voice.code"
 
 const currentSessionId = (api: TuiPluginApi) => {
   const route = api.route.current
@@ -42,9 +45,59 @@ const Chip = (props: { supervisor: VoiceSupervisor; onToggle: () => void }) => {
   )
 }
 
-const KV_MODEL = "vox.code.model"
-const KV_VOICE = "vox.code.voice"
-const KV_INSTRUCTIONS = "vox.code.instructions"
+const ApiKeyDialog = (props: { api: TuiPluginApi; onConfirm: (apiKey: string) => void }) => {
+  const [length, setLength] = createSignal(0)
+  let input: InputRenderable | undefined
+  const theme = props.api.theme.current
+
+  onMount(() => {
+    props.api.ui.dialog.setSize("medium")
+    setTimeout(() => input?.focus(), 1)
+  })
+  onCleanup(() => {
+    input?.setText("")
+    setLength(0)
+  })
+
+  const submit = (value: string) => {
+    const key = value.trim()
+    if (!key) return
+    input?.setText("")
+    setLength(0)
+    props.api.ui.dialog.clear()
+    props.onConfirm(key)
+  }
+
+  return (
+    <box paddingLeft={2} paddingRight={2} paddingBottom={1} gap={1}>
+      <text fg={theme.text}>Voice OpenAI API key</text>
+      <text fg={theme.textMuted}>The key is hidden and will be validated before it is saved.</text>
+      <input
+        ref={(value) => (input = value)}
+        width="100%"
+        focused
+        selectable={false}
+        showCursor={false}
+        textColor={theme.backgroundPanel}
+        focusedTextColor={theme.backgroundPanel}
+        selectionFg={theme.backgroundPanel}
+        onInput={(value) => setLength(Array.from(value).length)}
+        onSubmit={submit as never}
+        onKeyDown={(key) => {
+          if (key.name === "escape") props.api.ui.dialog.clear()
+        }}
+      />
+      <text fg={length() ? theme.text : theme.textMuted}>
+        {length() ? "•".repeat(length()) : "sk-..."}
+      </text>
+      <text fg={theme.textMuted}>enter submit · esc cancel</text>
+    </box>
+  )
+}
+
+const KV_MODEL = "voice.code.model"
+const KV_VOICE = "voice.code.voice"
+const KV_INSTRUCTIONS = "voice.code.instructions"
 
 const tui: TuiPlugin = async (api, options, meta) => {
   if (options?.enabled === false) return
@@ -57,7 +110,7 @@ const tui: TuiPlugin = async (api, options, meta) => {
     voice: typeof savedVoice === "string" && savedVoice.trim() ? savedVoice : options?.voice,
     instructions:
       typeof savedInstructions === "string"
-        ? savedInstructions.trim() || options?.instructions
+        ? savedInstructions.trim() || undefined
         : options?.instructions,
   })
   let supervisor: VoiceSupervisor
@@ -73,6 +126,7 @@ const tui: TuiPlugin = async (api, options, meta) => {
         onModelChange: (model) => api.kv.set(KV_MODEL, model),
         onVoiceChange: (voice) => api.kv.set(KV_VOICE, voice),
         onInstructionsChange: (instructions) => api.kv.set(KV_INSTRUCTIONS, instructions ?? ""),
+        currentContext: () => collectCurrentContext(api),
         focusSession: async (sessionId, directory) =>
           focusTuiSession(api as unknown as TuiFocusApi, sessionId, directory, api.state.path.directory),
       },
@@ -80,7 +134,7 @@ const tui: TuiPlugin = async (api, options, meta) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     voiceLog("daemon attach failed", message)
-    api.ui.toast({ title: "Vox Code", message, variant: "error", duration: 8000 })
+    api.ui.toast({ title: "Voice", message, variant: "error", duration: 8000 })
     return
   }
 
@@ -98,7 +152,7 @@ const tui: TuiPlugin = async (api, options, meta) => {
     const DialogPrompt = api.ui.DialogPrompt
     api.ui.dialog.replace(() => (
       <DialogSelect
-        title="Vox Code model"
+        title="Voice model"
         current={supervisor.model()}
         options={[
           ...LIVE_MODELS.map((model) => ({
@@ -125,7 +179,7 @@ const tui: TuiPlugin = async (api, options, meta) => {
           if (value === CUSTOM_REALTIME_MODEL) {
             api.ui.dialog.replace(() => (
               <DialogPrompt
-                title="Custom Vox Code model"
+                title="Custom voice model"
                 placeholder="gpt-live-1"
                 value={supervisor.model()}
                 onConfirm={(id) => {
@@ -148,7 +202,7 @@ const tui: TuiPlugin = async (api, options, meta) => {
     const DialogSelect = api.ui.DialogSelect
     api.ui.dialog.replace(() => (
       <DialogSelect
-        title="Vox Code speaker"
+        title="Voice speaker"
         current={supervisor.voice()}
         options={REALTIME_VOICES.map((voice) => ({
           title: voice.title,
@@ -174,7 +228,7 @@ const tui: TuiPlugin = async (api, options, meta) => {
     const custom = Boolean(supervisor.instructions()?.trim())
     api.ui.dialog.replace(() => (
       <DialogSelect
-        title="Vox Code prompt"
+        title="Voice prompt"
         current={custom ? "custom" : "default"}
         options={[
           {
@@ -214,6 +268,59 @@ const tui: TuiPlugin = async (api, options, meta) => {
     ))
   }
 
+  const enterApiKey = () => {
+    api.ui.dialog.replace(() => (
+      <ApiKeyDialog api={api} onConfirm={(apiKey) => void supervisor.setApiKey(apiKey)} />
+    ))
+  }
+
+  const manageApiKey = () => {
+    const DialogSelect = api.ui.DialogSelect
+    api.ui.dialog.replace(() => (
+      <DialogSelect
+        title="Voice API key"
+        options={[
+          {
+            title: "Add or replace key…",
+            value: "replace",
+            description: "Enter a masked OpenAI platform API key",
+          },
+          {
+            title: "Status",
+            value: "status",
+            description: "Show where the current key comes from without revealing it",
+          },
+          {
+            title: "Remove saved key",
+            value: "remove",
+            description: "Delete the Voice key from secure storage",
+          },
+        ]}
+        onSelect={(option) => {
+          const value = String(option.value)
+          if (value === "replace") {
+            enterApiKey()
+            return
+          }
+          api.ui.dialog.clear()
+          if (value === "remove") {
+            void supervisor.removeApiKey()
+            return
+          }
+          const status = resolveOpenAiApiKey({
+            pluginKey: resolved.apiKey,
+            directory: api.state.path.directory,
+          })
+          api.ui.toast({
+            title: "Voice",
+            message: status.key ? `API key configured via ${status.source}.` : status.hint,
+            variant: status.key ? "success" : "warning",
+          })
+        }}
+      />
+    ))
+  }
+
   api.lifecycle.onDispose(() => {
     voiceLog("tui disconnect keep-alive")
     void supervisor.dispose()
@@ -233,8 +340,10 @@ const tui: TuiPlugin = async (api, options, meta) => {
         : "session error"
     supervisor.handleError(sessionId, message)
   })
-  api.event.on("permission.updated", (event) => {
-    supervisor.handlePermission(event.properties.sessionID, event.properties.id, event.properties.title)
+  api.event.on("permission.asked", (event) => {
+    const { sessionID, id, permission, patterns } = event.properties
+    const title = patterns.length ? `${permission}: ${patterns.join(", ")}` : permission
+    supervisor.handlePermission(sessionID, id, title)
   })
 
   // Slash commands, palette rows, and Ctrl+Shift+V come from the keymap.
@@ -244,74 +353,75 @@ const tui: TuiPlugin = async (api, options, meta) => {
     mode: "base",
     commands: [
       {
-        name: "vox.toggle",
-        title: "Vox: toggle",
-        category: "Vox",
+        name: "voice.toggle",
+        title: "Voice: toggle",
+        category: "Voice",
         namespace: "palette",
-        slashName: "vox",
-        slashAliases: ["voice"],
+        slashName: "voice",
         suggested: true,
         run: toggle,
       },
       {
-        name: "vox.model",
-        title: "Vox: model",
-        category: "Vox",
+        name: "voice.model",
+        title: "Voice: model",
+        category: "Voice",
         namespace: "palette",
-        slashName: "vox-model",
-        slashAliases: ["voice-model"],
+        slashName: "voice-model",
         run: pickModel,
       },
       {
-        name: "vox.voice",
-        title: "Vox: speaker",
-        category: "Vox",
+        name: "voice.speaker",
+        title: "Voice: speaker",
+        category: "Voice",
         namespace: "palette",
-        slashName: "vox-voice",
-        slashAliases: ["voice-voice"],
+        slashName: "voice-speaker",
         run: pickVoice,
       },
       {
-        name: "vox.prompt",
-        title: "Vox: prompt",
-        category: "Vox",
+        name: "voice.prompt",
+        title: "Voice: prompt",
+        category: "Voice",
         namespace: "palette",
-        slashName: "vox-prompt",
-        slashAliases: ["voice-prompt"],
+        slashName: "voice-prompt",
         run: pickPrompt,
       },
       {
-        name: "vox.on",
-        title: "Vox: on",
-        category: "Vox",
+        name: "voice.key",
+        title: "Voice: API key",
+        category: "Voice",
         namespace: "palette",
-        slashName: "vox-on",
-        slashAliases: ["voice-on"],
+        slashName: "voice-key",
+        run: manageApiKey,
+      },
+      {
+        name: "voice.on",
+        title: "Voice: on",
+        category: "Voice",
+        namespace: "palette",
+        slashName: "voice-on",
         run: () => {
           void supervisor.start()
         },
       },
       {
-        name: "vox.off",
-        title: "Vox: off",
-        category: "Vox",
+        name: "voice.off",
+        title: "Voice: off",
+        category: "Voice",
         namespace: "palette",
-        slashName: "vox-off",
-        slashAliases: ["voice-off"],
+        slashName: "voice-off",
         run: () => {
           void supervisor.stop()
         },
       },
       {
-        name: "vox.status",
-        title: "Vox: status",
-        category: "Vox",
+        name: "voice.status",
+        title: "Voice: status",
+        category: "Voice",
         namespace: "palette",
-        slashName: "vox-status",
-        slashAliases: ["voice-status"],
+        slashName: "voice-status",
         run: () => {
           api.ui.toast({
-            title: "Vox Code",
+            title: "Voice",
             message: supervisor.statusText(),
             variant: "info",
             duration: 5000,
@@ -319,71 +429,79 @@ const tui: TuiPlugin = async (api, options, meta) => {
         },
       },
     ],
-    bindings: [{ key: resolved.keybind, cmd: "vox.toggle", desc: "Toggle Vox Code" }],
+    bindings: [{ key: resolved.keybind, cmd: "voice.toggle", desc: "Toggle Voice" }],
   })
 
   // Prompt `/` autocomplete still uses the legacy command registry in 1.18.
   // Keymap slashName covers ctrl+p; this covers the same `/review`-style list.
   api.command?.register(() => [
     {
-      title: "Vox: toggle",
-      value: "plugin.vox.toggle",
-      category: "Vox",
+      title: "Voice: toggle",
+      value: "plugin.voice.toggle",
+      category: "Voice",
       keybind: resolved.keybind,
       suggested: true,
-      slash: { name: "vox" },
+      slash: { name: "voice" },
       onSelect: toggle,
     },
     {
-      title: "Vox: model",
-      value: "plugin.vox.model",
-      category: "Vox",
+      title: "Voice: model",
+      value: "plugin.voice.model",
+      category: "Voice",
       suggested: true,
-      slash: { name: "vox-model" },
+      slash: { name: "voice-model" },
       onSelect: pickModel,
     },
     {
-      title: "Vox: speaker",
-      value: "plugin.vox.voice",
-      category: "Vox",
+      title: "Voice: speaker",
+      value: "plugin.voice.speaker",
+      category: "Voice",
       suggested: true,
-      slash: { name: "vox-voice" },
+      slash: { name: "voice-speaker" },
       onSelect: pickVoice,
     },
     {
-      title: "Vox: prompt",
-      value: "plugin.vox.prompt",
-      category: "Vox",
+      title: "Voice: prompt",
+      value: "plugin.voice.prompt",
+      category: "Voice",
       suggested: true,
-      slash: { name: "vox-prompt" },
+      slash: { name: "voice-prompt" },
       onSelect: pickPrompt,
     },
     {
-      title: "Vox: on",
-      value: "plugin.vox.on",
-      category: "Vox",
-      slash: { name: "vox-on" },
+      title: "Voice: API key",
+      value: "plugin.voice.key",
+      category: "Voice",
+      suggested: true,
+      slash: { name: "voice-key" },
+      onSelect: manageApiKey,
+    },
+    {
+      title: "Voice: on",
+      value: "plugin.voice.on",
+      category: "Voice",
+      slash: { name: "voice-on" },
       onSelect: () => {
         void supervisor.start()
       },
     },
     {
-      title: "Vox: off",
-      value: "plugin.vox.off",
-      category: "Vox",
-      slash: { name: "vox-off" },
+      title: "Voice: off",
+      value: "plugin.voice.off",
+      category: "Voice",
+      slash: { name: "voice-off" },
       onSelect: () => {
         void supervisor.stop()
       },
     },
     {
-      title: "Vox: status",
-      value: "plugin.vox.status",
-      category: "Vox",
-      slash: { name: "vox-status" },
+      title: "Voice: status",
+      value: "plugin.voice.status",
+      category: "Voice",
+      slash: { name: "voice-status" },
       onSelect: () => {
         api.ui.toast({
-          title: "Vox Code",
+          title: "Voice",
           message: supervisor.statusText(),
           variant: "info",
           duration: 5000,
@@ -404,8 +522,8 @@ const tui: TuiPlugin = async (api, options, meta) => {
   })
 
   api.ui.toast({
-    title: "Vox Code",
-    message: "Click ○ vox, or ctrl+p then Vox. /vox-voice plays a speaker sample. /vox-prompt edits how it talks.",
+    title: "Voice",
+    message: "Click ○ voice, or ctrl+p then Voice. Use /voice-key to save the API key.",
     variant: meta.state === "first" ? "success" : "info",
     duration: 6000,
   })

@@ -1,24 +1,10 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { Buffer } from "node:buffer"
-import { createLiveSession, liveConnectConfig, sessionStartPayload } from "../src/live.ts"
+import { createLiveSession, liveConnectConfig, openLive, sessionStartPayload } from "../src/live.ts"
 import { isLiveModel } from "../src/types.ts"
 
-class FakeSocket {
-  readyState = 1
-  sent: unknown[] = []
-  messageHandler?: (raw: string) => void
-  send(data: string) {
-    this.sent.push(JSON.parse(data))
-  }
-  close() {}
-  on(event: string, listener: (raw: string) => void) {
-    if (event === "message") this.messageHandler = listener
-  }
-  emit(payload: unknown) {
-    this.messageHandler?.(JSON.stringify(payload))
-  }
-}
+import { FakeSocket, deferred, tick } from "./helpers.ts"
 
 test("gpt-live-1 is recognized as a Live model", () => {
   assert.equal(isLiveModel("gpt-live-1"), true)
@@ -32,6 +18,20 @@ test("live websocket connects to /v1/live/sessions", () => {
   assert.equal(config.url, "wss://api.openai.com/v1/live/sessions")
   assert.equal(config.headers.Authorization, "Bearer sk-test")
   assert.equal("OpenAI-Beta" in config.headers, false)
+})
+
+test("failed live handshake closes the socket", async () => {
+  const socket = new FakeSocket()
+  const opening = openLive({
+    apiKey: "sk-test",
+    model: "gpt-live-1",
+    voice: "marin",
+    handlers: {},
+    socket,
+  })
+  socket.emit({ type: "error", error: { message: "handshake failed" } })
+  await assert.rejects(opening, /handshake failed/)
+  assert.equal(socket.closed, true)
 })
 
 test("session start uses GPT-Live plus Responses delegation", () => {
@@ -109,6 +109,7 @@ test("live function calls arrive inside response.event", async () => {
   }
   assert.equal(output.item.call_id, "call_1")
   assert.match(output.item.output, /accepted/)
+  socket.emit({ type: "response.event", event: { type: "response.completed", response: { output: [] } } })
   const continued = socket.sent.find((row) => (row as { type: string }).type === "response.create") as {
     type: string
     event_id?: string
@@ -149,4 +150,63 @@ test("live session.started opens; session.updated does not", () => {
   assert.equal(opens, 0)
   socket.emit({ type: "session.started" })
   assert.equal(opens, 1)
+})
+
+test("Live batches staggered tools until nested response completion and deduplicates calls", async () => {
+  const socket = new FakeSocket()
+  const slow = deferred<unknown>()
+  const calls: string[] = []
+  createLiveSession(socket, { onTool: async (name) => {
+    calls.push(name)
+    return name === "slow" ? slow.promise : { ok: true }
+  } })
+  const inner = (event: unknown) => socket.emit({ type: "response.event", delegation_id: "d1", event })
+  inner({ type: "response.created", response: { id: "r1" } })
+  const call = (name: string) => inner({ type: "response.output_item.done", item: { type: "function_call", name, call_id: name, arguments: "{}" } })
+  call("fast")
+  await tick()
+  call("slow")
+  call("fast")
+  inner({ type: "response.completed", response: { output: [] } })
+  assert.equal(socket.sent.filter((e) => e.type === "response.create").length, 0)
+  slow.resolve({ ok: true })
+  await tick()
+  assert.deepEqual(calls, ["fast", "slow"])
+  assert.equal(socket.sent.filter((e) => e.type === "response.create").length, 1)
+})
+
+test("Live quiet context uses thinking and late results cannot send after close", async () => {
+  const socket = new FakeSocket()
+  const result = deferred<unknown>()
+  const session = createLiveSession(socket, { onTool: () => result.promise })
+  session.injectText("context", false)
+  assert.equal(socket.sent[0].type, "session.thinking.append")
+  socket.emit({ type: "response.event", event: { type: "response.output_item.done", item: { type: "function_call", name: "slow", call_id: "c1", arguments: "{}" } } })
+  session.close()
+  const count = socket.sent.length
+  result.resolve({ ok: true })
+  await tick()
+  assert.equal(socket.sent.length, count)
+})
+
+test("Live transcript windows remain bounded without inventing turn boundaries", () => {
+  const socket = new FakeSocket()
+  let transcript = ""
+  const session = createLiveSession(socket, { onTranscript: (_, text) => { transcript = text } })
+  socket.emit({ type: "session.input_transcript.delta", delta: "x".repeat(5000) })
+  socket.emit({ type: "session.input_transcript.delta", delta: " latest words" })
+  assert.equal(transcript.length, 4000)
+  assert.ok(transcript.endsWith(" latest words"))
+  session.close()
+})
+
+test("Live graceful close waits for session.closed before closing its transport", () => {
+  const socket = new FakeSocket()
+  const session = createLiveSession(socket, {})
+  socket.emit({ type: "session.started" })
+  session.close()
+  assert.equal(socket.closed, false)
+  assert.equal(socket.sent.at(-1).type, "session.close")
+  socket.emit({ type: "session.closed", usage: { seconds: 1 } })
+  assert.equal(socket.closed, true)
 })

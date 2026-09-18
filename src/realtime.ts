@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer"
-import WebSocket from "ws"
+import { attachSocket as attach, handshake, openSocket, type SocketLike } from "./socket.ts"
+export type { SocketLike } from "./socket.ts"
 import { resolveSpokenInstructions } from "./instructions.ts"
 import { voiceLog } from "./log.ts"
 import { executeTool, parseToolArgs, REALTIME_TOOLS, resolveToolContext, type FocusHandler, type ToolContextInput } from "./tools.ts"
@@ -29,14 +30,6 @@ export type RealtimeSession = {
   close: () => void
 }
 
-export type SocketLike = {
-  readyState: number
-  send: (data: string) => void
-  close: () => void
-  on?: (event: string, listener: (...args: unknown[]) => void) => void
-  addEventListener?: (event: string, listener: (event: { data?: unknown; message?: string }) => void) => void
-}
-
 const OPEN = 1
 
 function isBenignRealtimeError(message: string) {
@@ -48,24 +41,11 @@ function isBenignRealtimeError(message: string) {
   )
 }
 
-function attach(socket: SocketLike, handlers: { message: (raw: string) => void; close: () => void; error: (err: string) => void }) {
-  if (typeof socket.addEventListener === "function") {
-    socket.addEventListener("message", (event) => {
-      const data = event.data
-      handlers.message(typeof data === "string" ? data : String(data))
-    })
-    socket.addEventListener("close", () => handlers.close())
-    socket.addEventListener("error", (event) => handlers.error(event.message ?? "WebSocket error"))
-    return
-  }
-  socket.on?.("message", (data: unknown) => {
-    const text = typeof data === "string" ? data : Buffer.isBuffer(data) ? data.toString("utf8") : String(data)
-    handlers.message(text)
-  })
-  socket.on?.("close", () => handlers.close())
-  socket.on?.("error", (error: unknown) => {
-    handlers.error(error instanceof Error ? error.message : String(error))
-  })
+function isActiveResponseError(error: { message?: string; code?: string } | undefined) {
+  return (
+    error?.code === "conversation_already_has_active_response" ||
+    error?.message?.toLowerCase().includes("conversation already has an active response") === true
+  )
 }
 
 export function realtimeConnectConfig(options: { apiKey: string; model: string }) {
@@ -91,6 +71,7 @@ export function sessionUpdatePayload(options: Pick<VoiceOptions, "model" | "voic
           transcription: { model: "gpt-4o-mini-transcribe" },
           turn_detection: {
             type: "semantic_vad",
+            eagerness: "high",
             interrupt_response: false,
             create_response: true,
           },
@@ -119,12 +100,27 @@ export function createRealtimeSession(
   toolCtx?: ToolContextInput,
   focus?: FocusHandler,
 ): RealtimeSession {
+  let closed = false
   const send = (payload: unknown) => {
-    if (socket.readyState !== OPEN) return
+    if (closed || socket.readyState !== OPEN) return
     socket.send(JSON.stringify(payload))
   }
 
   const seenCalls = new Set<string>()
+  const pendingCalls = new Set<string>()
+  let responseActive = false
+  let responseRequested = false
+  let opened = false
+  const flushResponse = () => {
+    if (closed || responseActive || pendingCalls.size || !responseRequested) return
+    responseRequested = false
+    responseActive = true
+    send({ type: "response.create" })
+  }
+  const requestResponse = () => {
+    responseRequested = true
+    flushResponse()
+  }
   let pendingByte = Buffer.alloc(0)
   let currentItemId: string | undefined
   let generatedBytes = 0
@@ -148,8 +144,9 @@ export function createRealtimeSession(
   }
 
   const handleToolCall = async (name: string, callId: string, args: Record<string, unknown>) => {
-    if (!name || !callId || seenCalls.has(callId)) return
+    if (closed || !name || !callId || seenCalls.has(callId)) return
     seenCalls.add(callId)
+    pendingCalls.add(callId)
     let output: unknown
     try {
       if (handlers.onTool) {
@@ -170,11 +167,13 @@ export function createRealtimeSession(
         output: JSON.stringify(output),
       },
     })
-    send({ type: "response.create" })
+    pendingCalls.delete(callId)
+    requestResponse()
   }
 
   attach(socket, {
     message: (raw) => {
+      if (closed) return
       let event: RealtimeEvent
       try {
         event = JSON.parse(raw) as RealtimeEvent
@@ -183,13 +182,39 @@ export function createRealtimeSession(
       }
       try {
       switch (event.type) {
-        case "session.created":
         case "session.updated":
-          handlers.onOpen?.()
+          if (!opened) {
+            opened = true
+            handlers.onOpen?.()
+          }
           break
+        case "response.created":
+          responseActive = true
+          break
+        case "response.done": {
+          const response = event.response as { status?: string; status_details?: { error?: { message?: string } }; output?: Array<{ type?: string; name?: string; call_id?: string; arguments?: string }> } | undefined
+          // The terminal snapshot is also a valid source of completed calls.
+          for (const item of response?.output ?? []) {
+            if (item.type === "function_call" && item.name && item.call_id) {
+              void handleToolCall(item.name, item.call_id, parseToolArgs(item.arguments)).catch((error) => handlers.onError?.(String(error)))
+            }
+          }
+          responseActive = false
+          if (response?.status === "failed") {
+            handlers.onError?.(response.status_details?.error?.message ?? "Realtime response failed")
+          } else flushResponse()
+          break
+        }
         case "error": {
-          const error = event.error as { message?: string } | undefined
+          const error = event.error as { message?: string; code?: string } | undefined
           const message = error?.message ?? "Realtime error"
+          if (isActiveResponseError(error)) {
+            // VAD may start a response while a client response.create is in flight.
+            // Keep the added context and retry after the active response finishes.
+            responseActive = true
+            responseRequested = true
+            break
+          }
           if (isBenignRealtimeError(message)) break
           handlers.onError?.(message)
           break
@@ -218,7 +243,7 @@ export function createRealtimeSession(
         }
         case "response.output_audio.done":
         case "response.audio.done":
-          void handlers.onAudioDone?.()
+          void Promise.resolve(handlers.onAudioDone?.()).catch((error) => handlers.onError?.(String(error)))
           break
         case "conversation.item.input_audio_transcription.completed": {
           const transcript = typeof event.transcript === "string" ? event.transcript : ""
@@ -237,8 +262,10 @@ export function createRealtimeSession(
         case "response.function_call_arguments.done": {
           const name = String(event.name ?? "")
           const callId = String(event.call_id ?? "")
+          if (seenCalls.has(callId)) break
+          responseActive = true
           const args = parseToolArgs(typeof event.arguments === "string" ? event.arguments : undefined)
-          void handleToolCall(name, callId, args)
+          void handleToolCall(name, callId, args).catch((error) => handlers.onError?.(String(error)))
           break
         }
         case "response.output_item.done": {
@@ -246,7 +273,9 @@ export function createRealtimeSession(
             | { type?: string; call_id?: string; name?: string; arguments?: string }
             | undefined
           if (item?.type !== "function_call" || !item.name || !item.call_id) break
-          void handleToolCall(item.name, item.call_id, parseToolArgs(item.arguments))
+          if (seenCalls.has(item.call_id)) break
+          responseActive = true
+          void handleToolCall(item.name, item.call_id, parseToolArgs(item.arguments)).catch((error) => handlers.onError?.(String(error)))
           break
         }
         default:
@@ -258,7 +287,11 @@ export function createRealtimeSession(
         handlers.onError?.(message)
       }
     },
-    close: () => handlers.onClose?.("closed"),
+    close: () => {
+      if (closed) return
+      closed = true
+      handlers.onClose?.("closed")
+    },
     error: (message) => handlers.onError?.(message),
   })
 
@@ -282,9 +315,10 @@ export function createRealtimeSession(
           content: [{ type: "input_text", text }],
         },
       })
-      if (speak) send({ type: "response.create" })
+      if (speak) requestResponse()
     },
     close() {
+      closed = true
       try {
         socket.close()
       } catch {
@@ -296,18 +330,7 @@ export function createRealtimeSession(
 
 export async function connectRealtimeSocket(options: { apiKey: string; model: string }): Promise<SocketLike> {
   const { url, headers } = realtimeConnectConfig(options)
-
-  const globalWs = (globalThis as { WebSocket?: new (url: string, extra?: unknown) => SocketLike }).WebSocket
-  if (globalWs && process.versions.bun) {
-    return new globalWs(url, { headers } as never)
-  }
-
-  const socket = new WebSocket(url, { headers })
-  await new Promise<void>((resolve, reject) => {
-    socket.once("open", () => resolve())
-    socket.once("error", (error) => reject(error))
-  })
-  return socket as unknown as SocketLike
+  return openSocket(url, headers)
 }
 
 export function openRealtime(options: {
@@ -325,44 +348,13 @@ export function openRealtime(options: {
   const start = async () => {
     const socket = options.socket ?? (await connectRealtimeSocket({ apiKey: options.apiKey, model: options.model }))
     const session = createRealtimeSession(socket, options.handlers, options.sessions, options.toolCtx, options.focus)
-    const send = (payload: unknown) => {
-      if (socket.readyState === OPEN) socket.send(JSON.stringify(payload))
+    try {
+      await handshake(socket, sessionUpdatePayload(options), "session.updated", "Realtime")
+      return session
+    } catch (error) {
+      session.close()
+      throw error
     }
-    const waitOpen = new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("Realtime connection timed out")), 8000)
-      let sent = false
-      const sendUpdate = () => {
-        if (sent || socket.readyState !== OPEN) return
-        sent = true
-        send(sessionUpdatePayload({ model: options.model, voice: options.voice, instructions: options.instructions }))
-      }
-      const onMessage = (raw: unknown) => {
-        const text = typeof raw === "string" ? raw : Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw)
-        let event: RealtimeEvent
-        try {
-          event = JSON.parse(text) as RealtimeEvent
-        } catch {
-          return
-        }
-        if (event.type === "session.created") sendUpdate()
-        if (event.type === "session.updated") {
-          clearTimeout(timer)
-          resolve()
-        }
-        if (event.type === "error") {
-          const error = event.error as { message?: string } | undefined
-          clearTimeout(timer)
-          reject(new Error(error?.message ?? "Realtime error"))
-        }
-      }
-      socket.on?.("message", onMessage)
-      socket.addEventListener?.("message", (event) => onMessage(event.data))
-      sendUpdate()
-      socket.on?.("open", sendUpdate)
-      socket.addEventListener?.("open", () => sendUpdate())
-    })
-    await waitOpen
-    return session
   }
   return start()
 }

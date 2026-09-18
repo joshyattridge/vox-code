@@ -25,7 +25,9 @@ function exportImport(value: string | { import?: string }) {
 test("GitHub / npx package is named vox-code and exposes server + TUI entrypoints", () => {
   const pkg = readPkg(repo)
   assert.equal(pkg.name, "vox-code")
-  assert.equal(pkg.bin?.["vox-code"], "./scripts/install.mjs")
+  const bin = pkg.bin?.["vox-code"]
+  assert.equal(bin?.replace(/^\.\//, ""), "scripts/install.mjs")
+  assert.equal(existsSync(join(repo, bin!)), true)
   assert.equal(pkg.dependencies?.["@opencode-ai/plugin"], undefined)
   assert.ok(pkg.peerDependencies?.["@opencode-ai/plugin"])
   const server = exportImport(pkg.exports["./server"])

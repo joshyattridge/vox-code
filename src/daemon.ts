@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto"
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
 import { createServer, type Server, type Socket } from "node:net"
 import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -29,6 +29,7 @@ export type DaemonSupervisorFactory = (input: {
   currentSessionId: () => string | undefined
   toast: (input: { message: string; variant?: "info" | "success" | "warning" | "error" }) => void
   focusSession: (sessionId: string, directory?: string) => boolean | Promise<boolean>
+  currentContext: () => Promise<unknown>
 }) => VoiceSupervisor
 
 const IDLE_EXIT_MS = 15_000
@@ -64,20 +65,22 @@ export async function listenVoiceDaemon(input?: {
   idleExitMs?: number
   installSignals?: boolean
 }): Promise<VoiceDaemon> {
-  const sockPath = input?.sockPath ?? process.env.VOX_SOCK ?? process.env.VOICE_SOCK ?? daemonSockPath()
+  const sockPath = input?.sockPath ?? process.env.VOICE_SOCK ?? daemonSockPath()
   const pidPath = input?.pidPath ?? daemonPidPath()
   const idleExitMs = input?.idleExitMs ?? IDLE_EXIT_MS
   mkdirSync(dirname(sockPath), { recursive: true })
 
   const sockets = new Set<Socket>()
+  let activeSocket: Socket | undefined
   const buffers = new WeakMap<Socket, string>()
+  const contexts = new WeakMap<Socket, { directory?: string; sessionId?: string; client?: ClientConfig }>()
   const pendingRpc = new Map<
     string,
-    { resolve: (value: { data?: unknown; error?: unknown }) => void; timer: ReturnType<typeof setTimeout> }
+    { socket: Socket; resolve: (value: { data?: unknown; error?: unknown }) => void; timer: ReturnType<typeof setTimeout> }
   >()
   const pendingFocus = new Map<
     string,
-    { resolve: (ok: boolean) => void; timer: ReturnType<typeof setTimeout> }
+    { socket: Socket; resolve: (ok: boolean) => void; timer: ReturnType<typeof setTimeout> }
   >()
   const clientProxy = createSessionClientProxy(createHttpSessionClient({}))
   let httpConfig: ClientConfig = {}
@@ -97,13 +100,15 @@ export async function listenVoiceDaemon(input?: {
     }
   }
 
-  const failPendingRpc = (message: string) => {
+  const failPendingRpc = (message: string, socket?: Socket) => {
     for (const [id, waiter] of pendingRpc) {
+      if (socket && waiter.socket !== socket) continue
       clearTimeout(waiter.timer)
       waiter.resolve({ error: { message } })
       pendingRpc.delete(id)
     }
     for (const [id, waiter] of pendingFocus) {
+      if (socket && waiter.socket !== socket) continue
       clearTimeout(waiter.timer)
       waiter.resolve(false)
       pendingFocus.delete(id)
@@ -112,7 +117,8 @@ export async function listenVoiceDaemon(input?: {
 
   const requestFocus = (sessionId: string, focusDirectory?: string) =>
     new Promise<boolean>((resolve) => {
-      if (sockets.size === 0) {
+      const target = activeSocket
+      if (!target || target.destroyed) {
         resolve(false)
         return
       }
@@ -126,15 +132,17 @@ export async function listenVoiceDaemon(input?: {
         if (!pendingFocus.delete(sessionId)) return
         resolve(false)
       }, 4000)
-      pendingFocus.set(sessionId, { resolve, timer })
-      broadcast({ type: "focus", sessionId, directory: focusDirectory })
+      pendingFocus.set(sessionId, { socket: target, resolve, timer })
+      target.write(encodeMessage({ type: "focus", sessionId, directory: focusDirectory }))
     })
 
   const rpcRequest = (op: string, params?: unknown) =>
     new Promise<{ data?: unknown; error?: unknown }>((resolve) => {
-      const target = sockets.values().next().value as Socket | undefined
+      const target = activeSocket && !activeSocket.destroyed
+        ? activeSocket
+        : (sockets.values().next().value as Socket | undefined)
       if (!target || target.destroyed) {
-        resolve({ error: { message: "Vox Code daemon has no TUI client" } })
+        resolve({ error: { message: "Voice daemon has no TUI client" } })
         return
       }
       const id = randomUUID()
@@ -142,7 +150,7 @@ export async function listenVoiceDaemon(input?: {
         if (!pendingRpc.delete(id)) return
         resolve({ error: { message: "TUI RPC timed out" } })
       }, 20_000)
-      pendingRpc.set(id, { resolve, timer })
+      pendingRpc.set(id, { socket: target, resolve, timer })
       target.write(encodeMessage({ type: "rpc", id, op, params } satisfies DownMessage))
     })
 
@@ -168,9 +176,18 @@ export async function listenVoiceDaemon(input?: {
   }
 
   const scheduleIdleExit = () => {
-    if (idleExit) clearTimeout(idleExit)
-    idleExit = undefined
-    if (sockets.size > 0 || closed) return
+    if (sockets.size > 0 || closed) {
+      if (idleExit) clearTimeout(idleExit)
+      idleExit = undefined
+      return
+    }
+    const resolved = resolveOptions(options)
+    if (supervisor?.state().desiredOn && !resolved.autoStopOnOpenCodeExit) {
+      if (idleExit) clearTimeout(idleExit)
+      idleExit = undefined
+      return
+    }
+    if (idleExit) return
     idleExit = setTimeout(() => {
       if (sockets.size > 0 || closed) return
       voiceLog("idle exit no tui", { phase: supervisor?.state().phase })
@@ -189,6 +206,11 @@ export async function listenVoiceDaemon(input?: {
           currentSessionId: () => currentSessionId,
           toast: (toast) => broadcast({ type: "toast", message: toast.message, variant: toast.variant }),
           focusSession: async (sessionId, focusDirectory) => requestFocus(sessionId, focusDirectory),
+          currentContext: async () => {
+            const result = await rpcRequest("tui.currentContext")
+            if (result.error) throw new Error("Current TUI context is unavailable")
+            return result.data
+          },
         })
       : createVoiceSupervisor({
           client: clientProxy,
@@ -198,22 +220,31 @@ export async function listenVoiceDaemon(input?: {
             currentSessionId: () => currentSessionId,
             toast: (toast) => broadcast({ type: "toast", message: toast.message, variant: toast.variant }),
             focusSession: async (sessionId, focusDirectory) => requestFocus(sessionId, focusDirectory),
+            currentContext: async () => {
+              const result = await rpcRequest("tui.currentContext")
+              if (result.error) throw new Error("Current TUI context is unavailable")
+              return result.data
+            },
           },
         })
-    unsub = supervisor.subscribe(() => broadcast(snapshot()))
+    unsub = supervisor.subscribe(() => {
+      broadcast(snapshot())
+      scheduleIdleExit()
+    })
     return supervisor
   }
 
   const handle = async (socket: Socket, message: UpMessage) => {
+    if (closed || socket.destroyed) return
     switch (message.type) {
       case "hello": {
-        if (message.directory) directory = message.directory
-        if (message.sessionId !== undefined) currentSessionId = message.sessionId
+        contexts.set(socket, message)
+        selectSocket(socket)
         if (message.options) options = { ...options, ...message.options }
         if (message.client) httpConfig = message.client
         refreshClient()
         const voice = ensureSupervisor()
-        const resolved = resolveOptions(message.options)
+        const resolved = resolveOptions(options)
         if (voice.state().phase === "off") {
           if (resolved.model && resolved.model !== voice.model()) {
             await voice.setModel(resolved.model)
@@ -240,13 +271,14 @@ export async function listenVoiceDaemon(input?: {
       }
       case "rpcResult": {
         const waiter = pendingRpc.get(message.id)
-        if (!waiter) return
+        if (!waiter || waiter.socket !== socket) return
         pendingRpc.delete(message.id)
         clearTimeout(waiter.timer)
         waiter.resolve({ data: message.data, error: message.error })
         return
       }
       case "start":
+        selectSocket(socket)
         await ensureSupervisor().start()
         return
       case "stop":
@@ -254,6 +286,7 @@ export async function listenVoiceDaemon(input?: {
         scheduleIdleExit()
         return
       case "toggle":
+        selectSocket(socket)
         await ensureSupervisor().toggle()
         scheduleIdleExit()
         return
@@ -265,6 +298,12 @@ export async function listenVoiceDaemon(input?: {
         return
       case "setInstructions":
         await ensureSupervisor().setInstructions(message.instructions)
+        return
+      case "setApiKey":
+        await ensureSupervisor().setApiKey(message.apiKey)
+        return
+      case "removeApiKey":
+        await ensureSupervisor().removeApiKey()
         return
       case "previewVoice":
         await ensureSupervisor().previewVoice(message.voice)
@@ -279,11 +318,12 @@ export async function listenVoiceDaemon(input?: {
         ensureSupervisor().handlePermission(message.sessionId, message.permissionId, message.title)
         return
       case "currentSession":
-        currentSessionId = message.sessionId
+        contexts.set(socket, { ...contexts.get(socket), sessionId: message.sessionId })
+        selectSocket(socket)
         return
       case "focusResult": {
         const waiter = pendingFocus.get(message.sessionId)
-        if (!waiter) return
+        if (!waiter || waiter.socket !== socket) return
         pendingFocus.delete(message.sessionId)
         clearTimeout(waiter.timer)
         waiter.resolve(Boolean(message.focused))
@@ -292,8 +332,17 @@ export async function listenVoiceDaemon(input?: {
     }
   }
 
+  const selectSocket = (socket: Socket) => {
+    activeSocket = socket
+    const context = contexts.get(socket)
+    directory = context?.directory
+    currentSessionId = context?.sessionId
+    httpConfig = context?.client ?? {}
+  }
+
   const server: Server = createServer((socket) => {
     sockets.add(socket)
+    activeSocket = socket
     buffers.set(socket, "")
     if (idleExit) {
       clearTimeout(idleExit)
@@ -307,22 +356,35 @@ export async function listenVoiceDaemon(input?: {
       buffers.set(socket, rest)
       for (const message of messages) {
         if (!isUpMessage(message)) continue
+        // Replies must bypass commands that may themselves be awaiting RPC.
+        // Stop must also be able to cancel a pending connection attempt.
+        if (["rpcResult", "focusResult", "stop"].includes(message.type)) {
+          void handle(socket, message).catch((error) => voiceLog("daemon reply failed", String(error)))
+          continue
+        }
         commandQueue = commandQueue.then(() =>
           handle(socket, message).catch((error) => {
-            voiceLog("daemon command failed", error instanceof Error ? error.message : String(error))
+            const detail = error instanceof Error ? error.message : String(error)
+            voiceLog("daemon command failed", detail)
+            broadcast({ type: "toast", message: detail, variant: "error" })
           }),
         )
       }
     })
     socket.on("close", () => {
       sockets.delete(socket)
-      if (sockets.size === 0) failPendingRpc("TUI disconnected")
+      if (activeSocket === socket) {
+        activeSocket = sockets.values().next().value as Socket | undefined
+        if (activeSocket) selectSocket(activeSocket)
+        else currentSessionId = undefined
+      }
+      failPendingRpc("TUI disconnected", socket)
       refreshClient()
       voiceLog("daemon client gone", { clients: sockets.size, phase: supervisor?.state().phase })
       scheduleIdleExit()
     })
     socket.on("error", () => {
-      sockets.delete(socket)
+      socket.destroy()
     })
   })
 
@@ -330,7 +392,7 @@ export async function listenVoiceDaemon(input?: {
     if (closed) return
     closed = true
     if (idleExit) clearTimeout(idleExit)
-    failPendingRpc("Vox Code daemon stopped")
+    failPendingRpc("Voice daemon stopped")
     unsub?.()
     await supervisor?.stop({ silent: true }).catch(() => undefined)
     for (const socket of sockets) socket.destroy()
@@ -372,7 +434,7 @@ export async function listenVoiceDaemon(input?: {
     if (code !== "EADDRINUSE") throw error
     const existing = readPid(pidPath)
     if (existing && pidAlive(existing)) {
-      throw new Error(`Vox Code daemon already running (pid ${existing})`)
+      throw new Error(`Voice daemon already running (pid ${existing})`)
     }
     try {
       unlinkSync(sockPath)
@@ -381,6 +443,7 @@ export async function listenVoiceDaemon(input?: {
     }
     await bind()
   }
+  chmodSync(sockPath, 0o600)
 
   try {
     writeFileSync(pidPath, `${process.pid}\n`)

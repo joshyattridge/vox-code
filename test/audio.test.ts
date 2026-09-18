@@ -1,10 +1,13 @@
 import assert from "node:assert/strict"
 import { existsSync, readFileSync, unlinkSync } from "node:fs"
-import { spawn } from "node:child_process"
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process"
+import { EventEmitter } from "node:events"
+import { PassThrough, Writable } from "node:stream"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { test } from "node:test"
-import { describeAudioDeps, detectAudio, ffplayArgs, FRAME_BYTES, makeSinePcm, pcmDurationMs, pcmRms, PcmWritePump, PREROLL_BYTES } from "../src/audio.ts"
+import { describeAudioDeps, detectAudio, ffplayArgs, FRAME_BYTES, makeSinePcm, pcmDurationMs, pcmRms, PcmWritePump, PREROLL_BYTES, StdinPcmPlayer, soxPlayArgs } from "../src/audio.ts"
+import { tick, until } from "./helpers.ts"
 import { SAMPLE_RATE } from "../src/types.ts"
 
 test("finds Homebrew rec/play even when PATH does not include them", () => {
@@ -77,10 +80,13 @@ test("pcmRms is zero for silence and high for a sine", () => {
   assert.equal(pcmDurationMs(Buffer.alloc(SAMPLE_RATE * 2)), 1000)
 })
 
-test("default preroll streams the first chunk immediately", () => {
+test("default preroll buffers 160 ms before speaker playback", () => {
   const pump = new PcmWritePump()
-  const flushed = pump.push(Buffer.from([1, 2, 3, 4]))
-  assert.deepEqual([...(flushed ?? [])], [1, 2, 3, 4])
+  const flushed = pump.push(Buffer.alloc(PREROLL_BYTES - 2))
+  assert.equal(flushed, undefined)
+  assert.equal(pump.flushing, false)
+  const started = pump.push(Buffer.alloc(2))
+  assert.equal(started?.length, PREROLL_BYTES)
   assert.equal(pump.flushing, true)
 })
 
@@ -88,7 +94,20 @@ test("frame and preroll sizes are even PCM16 byte counts", () => {
   assert.equal(FRAME_BYTES % 2, 0)
   assert.equal(PREROLL_BYTES % 2, 0)
   assert.equal(SAMPLE_RATE, 24000)
-  assert.equal(PREROLL_BYTES, 0)
+  assert.equal(PREROLL_BYTES, (SAMPLE_RATE * 2 * 160) / 1000)
+})
+
+test("a quiet delivery gap re-arms preroll for the next turn", () => {
+  let now = 0
+  const pump = new PcmWritePump(8, 800, () => now)
+  assert.equal(pump.push(Buffer.alloc(8))?.length, 8)
+  now = 100
+  assert.equal(pump.push(Buffer.alloc(2))?.length, 2)
+  now = 901
+  assert.equal(pump.push(Buffer.alloc(2)), undefined)
+  assert.equal(pump.flushing, false)
+  assert.equal(pump.queuedBytes, 2)
+  assert.equal(pump.push(Buffer.alloc(6))?.length, 8)
 })
 
 test("ffplay args play raw PCM16 from stdin", () => {
@@ -102,13 +121,18 @@ test("ffplay args play raw PCM16 from stdin", () => {
   assert.equal(args.includes("nobuffer+flush_packets"), false)
 })
 
-test("sox writes a jittered sine to wav without gaps", async () => {
-  const play = existsSync("/opt/homebrew/bin/sox") ? "/opt/homebrew/bin/sox" : undefined
-  if (!play) return
+test("sox writes a jittered sine to wav without gaps", async (t) => {
+  const play = existsSync("/opt/homebrew/bin/sox") ? "/opt/homebrew/bin/sox" : "sox"
+  if (spawnSync(play, ["--version"]).status !== 0) { t.skip("sox is not installed"); return }
   const sine = makeSinePcm(440, 0.8)
   const wav = join(tmpdir(), `vox-jitter-${process.pid}.wav`)
-  const child = spawn(play, ["-t", "raw", "-r", "24000", "-e", "signed", "-b", "16", "-c", "1", "-", wav], {
+  const child = spawn(play, [...soxPlayArgs(), wav], {
     stdio: ["pipe", "ignore", "ignore"],
+  })
+  t.after(() => { child.kill(); try { unlinkSync(wav) } catch {} })
+  const exited = new Promise<number | null>((resolve, reject) => {
+    child.once("error", reject)
+    child.once("close", resolve)
   })
   const pump = new PcmWritePump(PREROLL_BYTES, 800, () => Date.now())
   const chunk = 3840
@@ -120,22 +144,9 @@ test("sox writes a jittered sine to wav without gaps", async () => {
   const leftover = pump.flushHeld()
   if (leftover) child.stdin.write(leftover)
   child.stdin.end()
-  const code = await new Promise<number | null>((resolve) => {
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL")
-      resolve(null)
-    }, 3000)
-    child.on("close", (status) => {
-      clearTimeout(timer)
-      resolve(status)
-    })
-  })
-  if (code !== 0) {
-    try {
-      unlinkSync(wav)
-    } catch {}
-    return
-  }
+  const timer = setTimeout(() => child.kill("SIGKILL"), 3000)
+  const code = await exited.finally(() => clearTimeout(timer))
+  assert.equal(code, 0, "sox must complete successfully")
   const wavBytes = readFileSync(wav)
   unlinkSync(wav)
   const dataStart = wavBytes.indexOf(Buffer.from("data"))
@@ -154,4 +165,84 @@ test("detectAudio prefers sox play for raw PCM streaming", () => {
   if (!existsSync("/opt/homebrew/bin/play") || !existsSync("/opt/homebrew/bin/rec")) return
   const audio = detectAudio()
   assert.equal(audio.name, "sox")
+})
+
+test("speaker backpressure preserves PCM order without duplication", async (t) => {
+  const writes: Buffer[] = []
+  const callbacks: Array<() => void> = []
+  const child = new EventEmitter() as ChildProcessWithoutNullStreams
+  child.stdin = new Writable({ highWaterMark: 1, write(chunk, _, done) {
+    writes.push(Buffer.from(chunk))
+    callbacks.push(done)
+  } })
+  child.stdout = new PassThrough()
+  child.stderr = new PassThrough()
+  child.kill = () => true
+  const player = new StdinPcmPlayer(() => "test-player", [], () => {
+    queueMicrotask(() => child.emit("spawn"))
+    return child
+  })
+  t.after(() => player.stop())
+  await player.start()
+  const first = Buffer.from([1, 2])
+  const second = Buffer.from([3, 4])
+  player.push(first)
+  player.push(second)
+  assert.deepEqual(writes, [first])
+  callbacks.shift()!()
+  await tick()
+  assert.deepEqual(Buffer.concat(writes), Buffer.concat([first, second]))
+  callbacks.shift()!()
+  await player.drain()
+})
+
+test("finalizing a SoX response flushes its tail before the next turn", async (t) => {
+  const sox = existsSync("/opt/homebrew/bin/sox") ? "/opt/homebrew/bin/sox" : "sox"
+  if (spawnSync(sox, ["--version"]).status !== 0) { t.skip("sox is not installed"); return }
+  const output: Buffer[] = []
+  let spawns = 0
+  const args = [
+    "-q", "--ignore-length", "-t", "raw", "-r", String(SAMPLE_RATE), "-e", "signed", "-b", "16", "-c", "1", "-",
+    "-t", "raw", "-",
+  ]
+  const player = new StdinPcmPlayer(() => sox, args, (command, commandArgs) => {
+    spawns += 1
+    const child = spawn(command, commandArgs, { stdio: ["pipe", "pipe", "pipe"] })
+    child.stdout.on("data", (chunk: Buffer) => output.push(Buffer.from(chunk)))
+    return child
+  })
+  t.after(() => player.stop())
+
+  const first = makeSinePcm(440, 2.85)
+  await player.start()
+  player.push(first)
+  await player.drain(true)
+  assert.deepEqual(Buffer.concat(output), first)
+
+  const second = makeSinePcm(660, 0.37)
+  await player.start()
+  player.push(second)
+  await player.drain(true)
+  assert.equal(spawns, 2)
+  assert.deepEqual(Buffer.concat(output), Buffer.concat([first, second]))
+})
+
+test("missing speaker executable rejects startup instead of crashing the daemon", async () => {
+  const player = new StdinPcmPlayer(() => "/nonexistent/vox-test-player", [])
+  try {
+    await assert.rejects(player.start(), /ENOENT/)
+  } finally { player.stop() }
+})
+
+test("unexpected speaker exit is reported once without an infinite restart loop", async () => {
+  const player = new StdinPcmPlayer(() => process.execPath, ["-e", "process.exit(2)"])
+  const failures: Error[] = []
+  player.onError = (error) => failures.push(error)
+  try {
+    await player.start()
+    await until(() => failures.length > 0)
+    assert.equal(failures.length, 1)
+    assert.match(failures[0].message, /Speaker process exited \(2\)/)
+    assert.throws(() => player.push(Buffer.alloc(2)), /Speaker process exited/)
+  } finally { player.stop() }
 })
