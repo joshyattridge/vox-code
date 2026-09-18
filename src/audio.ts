@@ -404,6 +404,7 @@ class PipedAudio implements AudioIO {
   async drainPlayback(finalize = false) {
     if (this.#draining) return this.#draining
     const draining = (async () => {
+      const startedAt = Date.now()
       this.#clearPrerollTimer()
       const held = this.#pump.flushHeld()
       if (held) {
@@ -411,6 +412,7 @@ class PipedAudio implements AudioIO {
         this.#playback.push(held)
       }
       await this.#playback.drain(finalize)
+      voiceLog("playback drained", { finalize, elapsedMs: Date.now() - startedAt })
     })()
     this.#draining = draining
     try {

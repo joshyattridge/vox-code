@@ -19,7 +19,7 @@ Install SoX to run the raw-stream fidelity regression; otherwise that test is ex
 
 | Area | Coverage |
 |---|---|
-| Native audio | Full jittered PCM through real SoX; first-chunk and final-tail truncation regressions; consecutive response finalization; stream backpressure and byte order; missing executable and process exit; PCM sample alignment. |
+| Native audio | Full jittered PCM through real SoX; first-chunk and final-tail truncation regressions; consecutive response finalization; latest-assistant WAV integrity and silence metrics; stream backpressure and byte order; missing executable and process exit; PCM sample alignment. |
 | Realtime | GA payload, readiness acknowledgment, tool deduplication, staggered parallel calls, response continuation, worker-update queuing, VAD response race, late events after close. |
 | GPT-Live | Session configuration, nested tool calls, completion before continuation, duplicate calls, bounded transcript windows, quiet context, audio decode, graceful close. |
 | Lifecycle | Echo gating, overlapping completion callbacks, stop during startup/playback, failed key lookup, playback errors, reconnect, inactivity, billing warning and maximum duration. |

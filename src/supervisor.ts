@@ -6,6 +6,7 @@ import {
   type ResolvedApiKey,
 } from "./auth.ts"
 import { detectAudio, playPcmClip, type AudioIO } from "./audio.ts"
+import { analyzeAssistantPcm, assistantAudioPath, persistAssistantAudio } from "./audio-diagnostics.ts"
 import { persistVoiceState } from "./persist.ts"
 import { voiceLog } from "./log.ts"
 import { createSessionController, type SessionController } from "./sessions.ts"
@@ -65,6 +66,7 @@ export type VoiceSupervisor = {
 }
 
 const ECHO_HOLD_MS = 300
+const MAX_DIAGNOSTIC_AUDIO_BYTES = SAMPLE_RATE * 2 * 60
 
 function playbackMs(bytes: number) {
   return Math.ceil((bytes / 2 / SAMPLE_RATE) * 1000)
@@ -110,6 +112,12 @@ export function createVoiceSupervisor(input: {
   let lastAudioPacketAt = 0
   let audioStreamStartedAt = 0
   let audioStreamBytes = 0
+  let diagnosticAudio: Buffer[] = []
+  let diagnosticBytes = 0
+  let diagnosticPackets = 0
+  let maxPacketGapMs = 0
+  let bufferDepletions = 0
+  let diagnosticTruncated = false
   let playbackIdle = new AbortController()
   let playbackWrites: Promise<void> = Promise.resolve()
   let stopping = false
@@ -304,6 +312,12 @@ export function createVoiceSupervisor(input: {
     lastAudioPacketAt = 0
     audioStreamStartedAt = 0
     audioStreamBytes = 0
+    diagnosticAudio = []
+    diagnosticBytes = 0
+    diagnosticPackets = 0
+    maxPacketGapMs = 0
+    bufferDepletions = 0
+    diagnosticTruncated = false
     playbackIdle.abort()
     playbackWrites = Promise.resolve()
     playGeneration += 1
@@ -454,8 +468,10 @@ export function createVoiceSupervisor(input: {
             speaking = true
             const now = Date.now()
             const gapMs = lastAudioPacketAt ? now - lastAudioPacketAt : 0
+            maxPacketGapMs = Math.max(maxPacketGapMs, gapMs)
             const queuedMs = Math.max(0, playbackEndsAt - now)
             if (lastAudioPacketAt && !queuedMs) {
+              bufferDepletions += 1
               voiceLog("audio buffer depleted", { gapMs, packetMs: playbackMs(pcm.length) })
             } else if (gapMs > 300) {
               voiceLog("audio delivery gap", { gapMs, queuedMs, packetMs: playbackMs(pcm.length) })
@@ -463,6 +479,14 @@ export function createVoiceSupervisor(input: {
             lastAudioPacketAt = now
             if (!audioStreamStartedAt) audioStreamStartedAt = now
             audioStreamBytes += pcm.length
+            diagnosticPackets += 1
+            const remaining = MAX_DIAGNOSTIC_AUDIO_BYTES - diagnosticBytes
+            if (remaining > 0) {
+              const captured = pcm.subarray(0, remaining)
+              diagnosticAudio.push(captured)
+              diagnosticBytes += captured.length
+            }
+            if (pcm.length > remaining) diagnosticTruncated = true
             playbackEndsAt = Math.max(now, playbackEndsAt) + playbackMs(pcm.length)
             if (state.phase !== "speaking") setState({ phase: "speaking", realtimeConnected: true })
             const output = audio
@@ -483,6 +507,21 @@ export function createVoiceSupervisor(input: {
             const playbackGeneration = playGeneration
             const signal = playbackIdle.signal
             const output = audio
+            const pcm = diagnosticAudio.length === 1 ? diagnosticAudio[0] : Buffer.concat(diagnosticAudio)
+            const metrics = analyzeAssistantPcm(pcm, {
+              packets: diagnosticPackets,
+              maxPacketGapMs,
+              bufferDepletions,
+              truncated: diagnosticTruncated,
+            })
+            persistAssistantAudio(pcm, metrics)
+            voiceLog("assistant audio captured", { path: assistantAudioPath(), ...metrics })
+            diagnosticAudio = []
+            diagnosticBytes = 0
+            diagnosticPackets = 0
+            maxPacketGapMs = 0
+            bufferDepletions = 0
+            diagnosticTruncated = false
             try {
               await playbackWrites
               if (signal.aborted) return

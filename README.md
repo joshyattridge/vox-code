@@ -185,7 +185,7 @@ These optional checks use billable API calls and verify actual non-silent output
 | Voice hears itself | Use headphones with GPT-Live; Realtime automatically holds microphone transmission during replies. |
 | No microphone audio on macOS | Allow microphone access for the terminal/runtime in System Settings, and check `rec` is installed. |
 
-State, the Unix socket, PID file, and diagnostics live under `${XDG_DATA_HOME:-~/.local/share}/opencode/vox-code/` (`state.json`, `vox.sock`, `vox.pid`, `vox.log`). State snapshots are atomic, private (`0600`), and include the latest transcript window. Credentials use the OS keychain or the private fallback file described above. `/voice-off` releases audio immediately; a TUI disconnect alone allows a 15-second reconnection window.
+State, the Unix socket, PID file, and diagnostics live under `${XDG_DATA_HOME:-~/.local/share}/opencode/vox-code/` (`state.json`, `vox.sock`, `vox.pid`, `vox.log`). The most recent assistant response is retained as `latest-assistant.wav` with timing and silence metrics in `latest-assistant.json`; each response replaces the previous capture, and microphone audio is never recorded. State and audio diagnostics are atomic and private (`0600`). Credentials use the OS keychain or the private fallback file described above. `/voice-off` releases audio immediately; a TUI disconnect alone allows a 15-second reconnection window.
 
 ## Limits
 
